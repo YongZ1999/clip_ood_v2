@@ -25,7 +25,7 @@ from torch.utils.data import DataLoader, ConcatDataset
 
 from src.trainers.lora_nsp_trainer import LoRANSPTrainer
 from src.classifiers.lr_rgda_classifier import LRRGDAClassifier
-from src.classifiers.gaussian_statistics import build_stats_dict_from_features
+from src.classifiers.gaussian_statistics import build_multi_center_stats_dict
 from src.utils.reference_loader import load_reference_dataset
 
 from src.utils.main_utils import (
@@ -140,6 +140,9 @@ def parse_args():
                         help="qda_reg_alpha2 for LR-RGDA.")
     parser.add_argument("--rgda_alpha3", type=float, default=0.5,
                         help="qda_reg_alpha3 for LR-RGDA.")
+    parser.add_argument("--num_centers", type=int, default=1,
+                        help="Number of centers per class for multi-center LR-RGDA.\n"
+                             "1=standard single-center, >1=k-means multi-center.")
 
     args = parser.parse_args()
 
@@ -196,7 +199,9 @@ def main(args):
         all_features = torch.cat(all_feats)
         all_labels = torch.cat(all_lbls)
 
-        stats_dict = build_stats_dict_from_features(all_features, all_labels)
+        stats_dict, center_means = build_multi_center_stats_dict(
+            all_features, all_labels, M=args.num_centers
+        )
 
         lr_rgda_classifier = LRRGDAClassifier(
             stats_dict=stats_dict, device=args.device,
@@ -204,7 +209,8 @@ def main(args):
             qda_reg_alpha1=args.rgda_alpha1,
             qda_reg_alpha2=args.rgda_alpha2,
             qda_reg_alpha3=args.rgda_alpha3,
-            temperature=1.0
+            temperature=1.0,
+            M=args.num_centers, center_means=center_means,
         )
 
         num_id_classes = len(all_class_names)

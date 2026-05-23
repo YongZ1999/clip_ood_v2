@@ -22,10 +22,10 @@ def kmeans(x: torch.Tensor, M: int, n_iter: int = 20, seed: int = 42) -> torch.T
         # M >= 样本数时，每个样本自身作为一个中心
         return x
 
-    torch.manual_seed(seed)
     N, D = x.shape
-    # 随机选择初始中心
-    idx = torch.randperm(N)[:M]
+    # 使用局部 RNG 避免全局种子污染
+    rng = torch.Generator(device=x.device).manual_seed(seed + hash(str(x.shape)) % 2**31)
+    idx = torch.randperm(N, generator=rng)[:M]
     centers = x[idx].clone()
 
     for _ in range(n_iter):
@@ -93,8 +93,8 @@ def build_multi_center_stats_dict(
             mu = torch.mean(data_c, dim=0)
             stats_dict[int(c)] = GaussianStatistics(mu, cov)
         else:
-            # 多中心：k-means
-            centers = kmeans(data_c, M, seed=kmeans_seed)
+            # 多中心：k-means，用 class_id 做种子偏移确保每类不同
+            centers = kmeans(data_c, M, seed=kmeans_seed + int(c))
             # 主均值（兼容旧接口，取第一个中心）
             mu = centers[0]
             stats_dict[int(c)] = GaussianStatistics(mu, cov)
