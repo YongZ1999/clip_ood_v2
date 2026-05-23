@@ -53,9 +53,9 @@ def parse_args():
 
     # 数据集相关参数
     parser.add_argument("--id_datasets", type=str, nargs='+',
-                        default=["aircraft", "caltech101", "dtd", "eurosat", "flowers",
-                                 "food101", "mnist", "oxford_pets", "stanford_cars", "sun397"],
-                        help="List of ID datasets for training and ID evaluation.")
+                        default=ALL_XTAIL_DATASETS,
+                        help="List of ID datasets for training and ID evaluation. "
+                             "Use 'ALL' to select all 10 X-TAIL datasets.")
     parser.add_argument("--ood_datasets", type=str, nargs='*', default=None,
                         help="List of OOD datasets for OOD evaluation. If not specified, "
                              "automatically computed as X-TAIL \\ id_datasets.")
@@ -134,14 +134,18 @@ def parse_args():
     # LR-RGDA 构建参数
     parser.add_argument("--rgda_rank", type=int, default=32,
                         help="Rank for LR-RGDA low-rank decomposition.")
-    parser.add_argument("--rgda_alpha1", type=float, default=0.6,
+    parser.add_argument("--rgda_alpha1", type=float, default=0.3,
                         help="qda_reg_alpha1 for LR-RGDA.")
-    parser.add_argument("--rgda_alpha2", type=float, default=1.0,
+    parser.add_argument("--rgda_alpha2", type=float, default=2.0,
                         help="qda_reg_alpha2 for LR-RGDA.")
     parser.add_argument("--rgda_alpha3", type=float, default=0.5,
                         help="qda_reg_alpha3 for LR-RGDA.")
 
     args = parser.parse_args()
+
+    # 支持 'ALL' 简写
+    if len(args.id_datasets) == 1 and args.id_datasets[0].upper() == 'ALL':
+        args.id_datasets = ALL_XTAIL_DATASETS
 
     # 解析设备：优先 --device，否则用 --gpu 指定 cuda:N
     if args.device is None:
@@ -303,39 +307,33 @@ def main(args):
                      f"RGDA: {rgda_acc:5.1f}% | Ensemble: {ens_acc:5.1f}%")
 
     # ========== 5. 评估 OOD 数据集 ==========
-    logging.info("\n=== Evaluating OOD Datasets (Zero-shot only, RGDA/Ensemble inapplicable) ===")
+    logging.info("\n=== Evaluating OOD Datasets (Ensemble with alpha=%.1f) ===" % args.alpha)
     ood_zs_accs = []
     ood_rgda_accs = []
     ood_ens_accs = []
 
     for d_name in args.ood_datasets:
         if d_name in id_dataset_offset:
-            # OOD 同时也是 ID 数据集：复用 ID 分类器
             zs_acc, rgda_acc, ens_acc, _, _ = evaluate_dataset(
                 args, d_name, model, zeroshot_classifier, lr_rgda_classifier,
                 num_id_classes, id_dataset_offset[d_name]
             )
         else:
-            # 对于 novel OOD 数据集：用该数据集自身的类别名构建零样本分类器直接评估
+            # 构建 ID + OOD 联合零样本分类器，使 ensemble 能正确选择
             _, test_transform = get_transforms(d_name)
             _, te_loader, _, ood_c_names = get_xtail_trainloader(
                 root=args.root, dataset_name=d_name,
                 transform_train=None, transform_test=test_transform,
                 num_shots=args.num_shots, batch_size=args.batch_size
             )
-            from src.utils.feature_extractor import extract_features
-            features, labels = extract_features(model, te_loader, args.device)
-            features = features / features.norm(dim=-1, keepdim=True)
+            combined_class_names = all_class_names + ood_c_names
+            combined_zeroshot = get_zeroshot_classifier(model, processor, combined_class_names, args.device)
+            total_classes = len(combined_class_names)
 
-            ood_zeroshot = get_zeroshot_classifier(model, processor, ood_c_names, args.device)
-            with torch.no_grad():
-                features = features.to(args.device)
-                zs_logits = features @ ood_zeroshot
-                zs_logits_norm = zs_logits - zs_logits.max(dim=-1, keepdim=True).values
-                zs_preds = zs_logits_norm.argmax(dim=1)
-                zs_acc = zs_preds.eq(labels.to(args.device)).float().mean().item() * 100
-            rgda_acc = 0.0
-            ens_acc = 0.0
+            zs_acc, rgda_acc, ens_acc, _, _ = evaluate_dataset(
+                args, d_name, model, combined_zeroshot, lr_rgda_classifier,
+                num_id_classes, num_id_classes
+            )
 
         ood_zs_accs.append(zs_acc)
         ood_rgda_accs.append(rgda_acc)
@@ -344,12 +342,23 @@ def main(args):
                      f"RGDA: {rgda_acc:5.1f}% | Ensemble: {ens_acc:5.1f}%")
 
     # ========== 6. 打印指标报告 ==========
+    all_zs_accs = id_zs_accs + ood_zs_accs
+    all_rgda_accs = id_rgda_accs + ood_rgda_accs
+    all_ens_accs = id_ens_accs + ood_ens_accs
+    all_dataset_names = args.id_datasets + args.ood_datasets
+
     id_zs_avg = sum(id_zs_accs) / len(id_zs_accs)
     id_rgda_avg = sum(id_rgda_accs) / len(id_rgda_accs)
     id_ens_avg = sum(id_ens_accs) / len(id_ens_accs)
-    ood_zs_avg = sum(ood_zs_accs) / len(ood_zs_accs)
-    ood_rgda_avg = sum(ood_rgda_accs) / len(ood_rgda_accs)
-    ood_ens_avg = sum(ood_ens_accs) / len(ood_ens_accs)
+    if len(ood_zs_accs) > 0:
+        ood_zs_avg = sum(ood_zs_accs) / len(ood_zs_accs)
+        ood_rgda_avg = sum(ood_rgda_accs) / len(ood_rgda_accs)
+        ood_ens_avg = sum(ood_ens_accs) / len(ood_ens_accs)
+    else:
+        ood_zs_avg = ood_rgda_avg = ood_ens_avg = 0.0
+    total_zs_avg = sum(all_zs_accs) / len(all_zs_accs)
+    total_rgda_avg = sum(all_rgda_accs) / len(all_rgda_accs)
+    total_ens_avg = sum(all_ens_accs) / len(all_ens_accs)
 
     print("\n" + "=" * 110)
     print("JOINT FINE-TUNING RESULTS")
@@ -366,14 +375,20 @@ def main(args):
     print(f"{'ID Average':<15s} | {id_zs_avg:>7.1f}%  | {id_rgda_avg:>7.1f}%  | {id_ens_avg:>7.1f}%")
 
     # OOD 数据集详细结果
-    print(f"\n[OOD Datasets — Non-fine-tuned]")
-    print(f"{'Dataset':<15s} | {'Zero-shot':>9s} | {'LR-RGDA':>9s} | {'Ensemble':>9s}")
-    print("-" * 55)
-    for d_name, zs, rgda, ens in zip(args.ood_datasets,
-                                     ood_zs_accs, ood_rgda_accs, ood_ens_accs):
-        print(f"{d_name:<15s} | {zs:>7.1f}%  | {rgda:>7.1f}%  | {ens:>7.1f}%")
-    print("-" * 55)
-    print(f"{'OOD Average':<15s} | {ood_zs_avg:>7.1f}%  | {ood_rgda_avg:>7.1f}%  | {ood_ens_avg:>7.1f}%")
+    if len(args.ood_datasets) > 0:
+        print(f"\n[OOD Datasets — Non-fine-tuned]")
+        print(f"{'Dataset':<15s} | {'Zero-shot':>9s} | {'LR-RGDA':>9s} | {'Ensemble':>9s}")
+        print("-" * 55)
+        for d_name, zs, rgda, ens in zip(args.ood_datasets,
+                                         ood_zs_accs, ood_rgda_accs, ood_ens_accs):
+            print(f"{d_name:<15s} | {zs:>7.1f}%  | {rgda:>7.1f}%  | {ens:>7.1f}%")
+        print("-" * 55)
+        print(f"{'OOD Average':<15s} | {ood_zs_avg:>7.1f}%  | {ood_rgda_avg:>7.1f}%  | {ood_ens_avg:>7.1f}%")
+        print("-" * 55)
+
+    # 全部数据集总平均
+    print(f"\n[All Datasets — Total Average]")
+    print(f"{'All Average':<15s} | {total_zs_avg:>7.1f}%  | {total_rgda_avg:>7.1f}%  | {total_ens_avg:>7.1f}%")
     print("=" * 110)
 
     # ========== 7. Alpha 敏感性分析（批处理，如 debug_classifier_router.py）==========
@@ -449,6 +464,18 @@ def main(args):
                     "zero_shot": ood_zs_avg,
                     "lr_rgda": ood_rgda_avg,
                     "ours_ensemble": ood_ens_avg,
+                }
+            },
+            "total": {
+                "per_dataset": {
+                    "zero_shot": {d: v for d, v in zip(all_dataset_names, all_zs_accs)},
+                    "lr_rgda": {d: v for d, v in zip(all_dataset_names, all_rgda_accs)},
+                    "ours_ensemble": {d: v for d, v in zip(all_dataset_names, all_ens_accs)},
+                },
+                "average": {
+                    "zero_shot": total_zs_avg,
+                    "lr_rgda": total_rgda_avg,
+                    "ours_ensemble": total_ens_avg,
                 }
             }
         }

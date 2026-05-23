@@ -115,9 +115,9 @@ def parse_args():
     # LR-RGDA 构建参数
     parser.add_argument("--rgda_rank", type=int, default=32,
                         help="Rank for LR-RGDA low-rank decomposition.")
-    parser.add_argument("--rgda_alpha1", type=float, default=0.6,
+    parser.add_argument("--rgda_alpha1", type=float, default=0.3,
                         help="qda_reg_alpha1 for LR-RGDA.")
-    parser.add_argument("--rgda_alpha2", type=float, default=1.0,
+    parser.add_argument("--rgda_alpha2", type=float, default=2.0,
                         help="qda_reg_alpha2 for LR-RGDA.")
     parser.add_argument("--rgda_alpha3", type=float, default=0.5,
                         help="qda_reg_alpha3 for LR-RGDA.")
