@@ -241,8 +241,15 @@ def main(args):
         id_zs_avg = sum(id_zs) / len(id_zs)
         id_rgda_avg = sum(id_rgda) / len(id_rgda)
         id_ens_avg = sum(id_ens) / len(id_ens)
-        logging.info(f"[{tag} ID Average] ZS: {id_zs_avg:.1f}% | "
-                     f"RGDA: {id_rgda_avg:.1f}% | Ensemble: {id_ens_avg:.1f}%")
+
+        # 打印格式化总表（中间评估 + 最终评估共用）
+        print(f"\n[{tag} ID Summary]")
+        print(f"{'Dataset':<15s} | {'Zero-shot':>9s} | {'LR-RGDA':>9s} | {'Ensemble':>9s}")
+        print("-" * 55)
+        for d_name, zs, rgda, ens in zip(args.id_datasets, id_zs, id_rgda, id_ens):
+            print(f"{d_name:<15s} | {zs:>7.1f}%  | {rgda:>7.1f}%  | {ens:>7.1f}%")
+        print("-" * 55)
+        print(f"{'Average':<15s} | {id_zs_avg:>7.1f}%  | {id_rgda_avg:>7.1f}%  | {id_ens_avg:>7.1f}%")
 
         return (id_zs, id_rgda, id_ens, id_zs_avg, id_rgda_avg, id_ens_avg,
                 id_dataset_offset_map, num_id_classes, zs_classifier, lr_rgda_classifier)
