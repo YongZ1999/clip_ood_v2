@@ -134,7 +134,73 @@ paper_writing/
 
 ---
 
-## 3. 项目快速概览
+## 3. 开发与运行环境
+
+### 架构：本地编辑 → 服务器运行
+
+> **本项目仅在本地保存代码，实际运行在远程 GPU 服务器上。**
+> AI agent 每次需要执行代码/运行实验时，必须按以下流程操作。
+
+#### 服务器信息
+
+| 项目 | 内容 |
+|------|------|
+| 服务器地址 | `raoxuan@10.20.34.30` |
+| 远程项目路径 | `/home/raoxuan/projects/clip_ood`（对应本地的 `project_clip_continual_learning/`） |
+| GitHub 仓库 | `https://github.com/raoxuan98-hash/clip_ood`（即将更名为 `project_clip_continual_learning`） |
+| 数据路径 | `/home/raoxuan/projects/data/X-TAIL/` |
+
+#### 标准工作流
+
+```
+本地（Mac）                        服务器（Linux + GPU）
+───────                           ────────────────────
+1. 修改代码
+2. git add + git commit + git push
+                                     3. ssh 登录
+                                     4. cd /home/raoxuan/projects/clip_ood
+                                     5. git pull
+                                     6. 运行实验 / 执行代码
+                                     7. 实验结果保存在 experiments/ 目录
+8. 如需查看结果，scp 或直接在服务器上查看
+```
+
+#### AI agent 执行代码/实验的操作步骤
+
+当需要运行代码或实验时，必须执行：
+
+```bash
+# 第一步：确保本地修改已提交并推送
+git add -A && git commit -m "[说明] ..." && git push
+
+# 第二步：SSH 到服务器拉取最新代码
+ssh raoxuan@10.20.34.30 "
+  cd /home/raoxuan/projects/clip_ood &&
+  git pull &&
+  <执行命令>
+"
+```
+
+#### 注意事项
+
+- **不要在本地运行训练/实验代码**——本地 Mac 没有 GPU，训练脚本会失败
+- **提交前确保代码可运行**——推送后再远程调试成本较高
+- **服务器上的 `experiments/` 和 `optimization/` 目录被 `.gitignore` 排除**，不会被 `git pull` 覆盖
+- 远程服务器已安装所需的 Python 环境和依赖（PyTorch, CUDA, transformers 等）
+- 如需在服务器上安装新依赖，通过 SSH 执行 `pip install`
+
+### GitHub 仓库重命名
+
+当前远程仓库名为 `clip_ood`，将重命名为 `project_clip_continual_learning` 以与本地目录名保持一致。
+重命名后需更新本地 remote URL：
+
+```bash
+git remote set-url origin https://github.com/raoxuan98-hash/project_clip_continual_learning.git
+```
+
+---
+
+## 4. 项目快速概览
 
 > 下面是为 AI agent 提供的高层上下文，避免每次重新探索。
 
@@ -191,7 +257,7 @@ CLIP 模型在持续学习中的灾难性遗忘。微调会破坏跨模态对齐
 
 ---
 
-## 4. 代码组织速查
+## 5. 代码组织速查
 
 ```
 project_clip_continual_learning/
@@ -227,7 +293,7 @@ project_clip_continual_learning/
 
 ---
 
-## 5. 工作守则
+## 6. 工作守则
 
 ### Git 提交策略
 
@@ -296,13 +362,32 @@ git push
 - **提交并推送至 GitHub**（见上方的 Git 提交策略）
 
 ### 运行实验
+
+**牢记：代码在本地的 Mac 上，执行在远程 GPU 服务器上。**
+
+标准流程：
+
+```bash
+# 1. 本地：提交并推送
+cd /path/to/project_clip_continual_learning
+git add -A && git commit -m "[实验] ..." && git push
+
+# 2. SSH 到服务器拉取并运行
+ssh raoxuan@10.20.34.30 "
+  cd /home/raoxuan/projects/clip_ood &&
+  git pull &&
+  python scripts/run_cached_experiment.py --config ...
+"
+```
+
 - 配置文件在 `configs/experiments/`，用 YAML 覆盖继承体系
-- 数据路径默认在 `/home/raoxuan/projects/data/X-TAIL/`（注意这是远程路径，本地可能需调整）
+- 数据路径（服务器上）：`/home/raoxuan/projects/data/X-TAIL/`
 - 使用 `scripts/` 下的 shell 脚本批量运行实验
+- 实验结果在服务器上的 `experiments/` 目录，不会被 `.gitignore` 误删除
 
 ---
 
-## 6. 重要约定
+## 7. 重要约定
 
 - **`src/classifiers/` 中的 `lr_rgda_classifier.py` 和 `gaussian_classifier.py`**：前者是高层封装（继承自 `da_classifier_builder.py` 构建器），后者是底层 nn.Module。注意区分。
 - **`src/models/trainer.py`** 是旧版/遗留代码。新的训练逻辑在 `src/trainers/lora_nsp_trainer.py`。

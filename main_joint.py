@@ -31,14 +31,15 @@ from src.trainers.lora_nsp_trainer import LoRANSPTrainer
 from src.classifiers.lr_rgda_classifier import LRRGDAClassifier
 from src.detectors.ood_detector import build_stats_dict_from_features
 from src.utils.reference_loader import load_reference_dataset
+
 from src.utils.main_utils import (
     fix_random_seed,
     get_zeroshot_classifier,
     evaluate_dataset,
     batch_evaluate_datasets,
     get_full_stats,
-    print_paper_metrics,
-)
+    print_paper_metrics)
+
 from utils_data import get_xtail_trainloader, get_transforms
 
 
