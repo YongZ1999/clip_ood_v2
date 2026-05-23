@@ -329,6 +329,7 @@ def main(args):
 
             ood_zeroshot = get_zeroshot_classifier(model, processor, ood_c_names, args.device)
             with torch.no_grad():
+                features = features.to(args.device)
                 zs_logits = features @ ood_zeroshot
                 zs_logits_norm = zs_logits - zs_logits.max(dim=-1, keepdim=True).values
                 zs_preds = zs_logits_norm.argmax(dim=1)
