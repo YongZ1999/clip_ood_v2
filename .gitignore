@@ -71,6 +71,18 @@ PRESENTATION.md
 experiments/
 optimization/
 
+# Paper writing - reference papers (copyrighted), personal notes, discussions
+paper_writing/reference_papers/
+paper_writing/my_original_papers/
+paper_writing/讨论/
+paper_writing/generated-images/
+paper_writing/.workbuddy/
+
+# Compiled PDF artifacts
+*.pdf
+
+.workbuddy/
+
 # Backup files
 *.backup.*
 *.bak
