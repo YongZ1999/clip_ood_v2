@@ -65,9 +65,11 @@ def parse_args():
     # 训练基础参数
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed for reproducibility.")
+    parser.add_argument("--gpu", type=int, default=0,
+                        help="GPU index to use (e.g., 0 for cuda:0). Sets CUDA_VISIBLE_DEVICES.")
     parser.add_argument("--device", type=str,
-                        default="cuda" if torch.cuda.is_available() else "cpu",
-                        help="Device to use for training.")
+                        default=None,
+                        help="Device to use for training. Overrides --gpu if set.")
     parser.add_argument("--iterations", type=int, default=800,
                         help="Number of training iterations per task.")
 
@@ -129,6 +131,11 @@ def parse_args():
     args = parser.parse_args()
     # 将 dataset_sequence 转换为嵌套列表格式 [[d1], [d2], ...]
     args.dataset_sequence = [[d] for d in args.dataset_sequence]
+
+    # 解析设备：优先 --device，否则用 --gpu 指定 cuda:N
+    if args.device is None:
+        args.device = f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu"
+
     return args
 
 
