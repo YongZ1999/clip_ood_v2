@@ -270,8 +270,9 @@ class LoRANSPTrainer:
         if aux_weight > 0:
             feature_dim = self.model.config.projection_dim
             num_classes = len(class_names)
-            aux_head = nn.Linear(feature_dim, num_classes).to(self.device)
-            logging.info(f"✓ Auxiliary linear head created: {feature_dim} -> {num_classes} (weight={aux_weight})")
+            # 辅助头接收未归一化的投影特征，且不使用 bias
+            aux_head = nn.Linear(feature_dim, num_classes, bias=False).to(self.device)
+            logging.info(f"✓ Auxiliary linear head created: {feature_dim} -> {num_classes} (bias=False, weight={aux_weight})")
             opt_params = base_params + list(aux_head.parameters())
         else:
             opt_params = base_params
@@ -306,18 +307,21 @@ class LoRANSPTrainer:
             images = images.to(self.device)
             labels = labels.to(self.device)
 
-            img_feats = self.encode_image(images)
-            img_feats = img_feats / img_feats.norm(dim=-1, keepdim=True)
+            # 单次前向：同时获取未归一化和归一化特征
+            vision_outputs = self.model.vision_model(images)
+            pooled = vision_outputs[1]  # [batch, 768] pooled CLS token
+            proj_feats = self.model.visual_projection(pooled)  # [batch, 512] 未归一化
+            norm_feats = F.normalize(proj_feats, dim=-1)  # [batch, 512] 已归一化
 
-            # 零样本对比损失
-            logits = logit_scale.exp() * (img_feats @ classifier)
+            # 零样本对比损失（归一化特征）
+            logits = logit_scale.exp() * (norm_feats @ classifier)
             ce_loss = F.cross_entropy(logits, labels, label_smoothing=0.1)
             loss = ce_loss
 
-            # 辅助线性分类头损失（特征空间直接 CE）
+            # 辅助线性分类头损失（未归一化特征，无 bias）
             l_aux_val = 0.0
             if aux_head is not None:
-                aux_logits = aux_head(img_feats)
+                aux_logits = aux_head(proj_feats)
                 aux_ce = F.cross_entropy(aux_logits, labels)
                 loss = loss + aux_weight * aux_ce
                 l_aux_val = aux_ce.item()

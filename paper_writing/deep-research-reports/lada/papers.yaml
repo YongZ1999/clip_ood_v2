@@ -1,0 +1,7 @@
+papers:
+  - arxiv_id: "2505.23271"
+    title: "LADA: Scalable Label-Specific CLIP Adapter for Continual Learning"
+    authors: "Mao-Lin Luo, Zi-Hao Zhou, Tong Wei, Min-Ling Zhang"
+    year: 2025
+    venue: "ICML 2025"
+    reading_level: "deep_read"
