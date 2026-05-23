@@ -35,8 +35,8 @@ class RegularQDAClassifierBuilder(BaseClassifierBuilder):
     def __init__(
         self,
         qda_reg_alpha1=0.2,
-        qda_reg_alpha2=0.2,
-        qda_reg_alpha3=0.2,
+        qda_reg_alpha2=2.0,
+        qda_reg_alpha3=0.5,
         device="cuda",
     ):
         self.qda_reg_alpha1 = qda_reg_alpha1
@@ -68,8 +68,8 @@ class LRRGDAClassifierBuilder(BaseClassifierBuilder):
         self,
         rank=64,
         qda_reg_alpha1=0.2,
-        qda_reg_alpha2=0.2,
-        qda_reg_alpha3=0.2,
+        qda_reg_alpha2=2.0,
+        qda_reg_alpha3=0.5,
         temperature=1.0,
         device="cuda",
     ):

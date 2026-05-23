@@ -33,9 +33,9 @@ class LRRGDAClassifier:
         stats_dict: Dict[int, GaussianStatistics], 
         device: str = 'cuda',
         rank: int = 32,  # 优化后的默认值
-        qda_reg_alpha1: float = 0.3,
-        qda_reg_alpha2: float = 0.3,
-        qda_reg_alpha3: float = 0.3,
+        qda_reg_alpha1: float = 0.2,
+        qda_reg_alpha2: float = 2.0,
+        qda_reg_alpha3: float = 0.5,
         temperature: float = 1.0
     ):
         """

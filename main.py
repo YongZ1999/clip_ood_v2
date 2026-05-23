@@ -269,7 +269,7 @@ def main(args):
         # 4. 构建分类器
         lr_rgda_classifier = LRRGDAClassifier(
             stats_dict=stats_dict, device=args.device, rank=32,
-            qda_reg_alpha1=0.6, qda_reg_alpha2=1.0, qda_reg_alpha3=0.5, temperature=1.0
+            qda_reg_alpha1=0.2, qda_reg_alpha2=2.0, qda_reg_alpha3=0.5, temperature=1.0
         )
         
         num_id_classes = len(all_class_names)
@@ -405,8 +405,8 @@ def main(args):
                 stats_dict=global_stats_dict,
                 device=args.device,
                 rank=32,
-                qda_reg_alpha1=0.6,
-                qda_reg_alpha2=1.0,
+                qda_reg_alpha1=0.2,
+                qda_reg_alpha2=2.0,
                 qda_reg_alpha3=0.5,
                 temperature=1.0
             )
