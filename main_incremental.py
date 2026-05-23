@@ -105,6 +105,10 @@ def parse_args():
                         help="Weight for feature distillation loss.")
     parser.add_argument("--cd_weight", type=float, default=1.0,
                         help="Weight for cross-modal distillation loss.")
+    parser.add_argument("--aux_weight", type=float, default=0.0,
+                        help="Weight for auxiliary linear classifier loss (0=disabled). "
+                             "Adds a linear head on features during training to improve "
+                             "feature separability for downstream LR-RGDA.")
 
     # 分类器参数
     parser.add_argument("--alpha", type=float, default=0.5,
@@ -173,7 +177,8 @@ def main(args):
         merged_loader = DataLoader(merged_dataset, batch_size=args.batch_size, shuffle=True)
 
         # --- 2b. 训练模型 (LoRA-NSP) ---
-        model = trainer.train(merged_loader, task_class_names, reference_loader)
+        model = trainer.train(merged_loader, task_class_names, reference_loader,
+                              aux_weight=args.aux_weight)
 
         # --- 2c. 零空间投影 (NSP) 抗遗忘 ---
         print("\n=== Applying Null-Space Projection (NSP) ===")

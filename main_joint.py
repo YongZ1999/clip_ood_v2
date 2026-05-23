@@ -110,6 +110,10 @@ def parse_args():
                         help="Weight for feature distillation loss.")
     parser.add_argument("--cd_weight", type=float, default=1.0,
                         help="Weight for cross-modal distillation loss.")
+    parser.add_argument("--aux_weight", type=float, default=0.0,
+                        help="Weight for auxiliary linear classifier loss (0=disabled). "
+                             "Adds a linear head on features during training to improve "
+                             "feature separability for downstream LR-RGDA.")
 
     # 模型微调开关
     parser.add_argument("--tune_student", type=lambda x: x.lower() == 'true', default=True,
@@ -305,7 +309,8 @@ def main(args):
             run_full_evaluation(current_model, tag=f"Iter {step}")
 
         model = trainer.train(merged_loader, all_class_names, reference_loader,
-                              eval_interval=500, eval_callback=eval_callback)
+                              eval_interval=500, eval_callback=eval_callback,
+                              aux_weight=args.aux_weight)
 
         # 2c. 合并 LoRA 权重（训练结束后只需一次）
         logging.info("\n=== Merging LoRA Weights for Joint Evaluation ===")

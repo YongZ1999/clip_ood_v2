@@ -245,7 +245,8 @@ class LoRANSPTrainer:
         logging.info(f"✓ Task finalized: LoRA weights merged to main weights and reset.")
     
     def train(self, train_loader, class_names, reference_loader,
-              eval_interval: int = 0, eval_callback=None):
+              eval_interval: int = 0, eval_callback=None,
+              aux_weight: float = 0.0):
         """
         训练模型
 
@@ -255,21 +256,36 @@ class LoRANSPTrainer:
             reference_loader: 参考数据集加载器（用于蒸馏）
             eval_interval: 每 N 步调用一次 eval_callback（0 表示不调用）
             eval_callback: 回调函数 fn(model, step)，在 eval_interval 步时调用
+            aux_weight: 辅助线性分类头损失权重（0=禁用）。在特征空间直接计算 CE 损失，
+                        帮助特征更具线性可分性，提升下游 LR-RGDA 分类器性能。
         """
         # 预计算零样本分类器权重
         templates = [lambda x: f"a photo of a {x}."]
         classifier = self.zeroshot_classifier(class_names, templates)
-        
+
+        # 确定优化器参数（LoRA params + 可选的辅助分类头）
+        base_params = list(self.model.vision_model.get_params())
+
+        aux_head = None
+        if aux_weight > 0:
+            feature_dim = self.model.config.projection_dim
+            num_classes = len(class_names)
+            aux_head = nn.Linear(feature_dim, num_classes).to(self.device)
+            logging.info(f"✓ Auxiliary linear head created: {feature_dim} -> {num_classes} (weight={aux_weight})")
+            opt_params = base_params + list(aux_head.parameters())
+        else:
+            opt_params = base_params
+
         # 优化器
         optimizer, scheduler = self.get_optimizer(
-            self.model.vision_model.get_params(), 
-            self.args.lr, 
-            self.args.weight_decay, 
+            opt_params,
+            self.args.lr,
+            self.args.weight_decay,
             self.args.iterations
         )
-        
+
         logit_scale = self.model.logit_scale.detach()
-        
+
         # 训练循环
         self.model.train()
         train_iter = iter(train_loader)
@@ -293,9 +309,18 @@ class LoRANSPTrainer:
             img_feats = self.encode_image(images)
             img_feats = img_feats / img_feats.norm(dim=-1, keepdim=True)
 
+            # 零样本对比损失
             logits = logit_scale.exp() * (img_feats @ classifier)
             ce_loss = F.cross_entropy(logits, labels, label_smoothing=0.1)
             loss = ce_loss
+
+            # 辅助线性分类头损失（特征空间直接 CE）
+            l_aux_val = 0.0
+            if aux_head is not None:
+                aux_logits = aux_head(img_feats)
+                aux_ce = F.cross_entropy(aux_logits, labels)
+                loss = loss + aux_weight * aux_ce
+                l_aux_val = aux_ce.item()
 
             preds = logits.argmax(dim=-1)
             train_acc = (preds == labels).float().mean().item() * 100
@@ -342,6 +367,7 @@ class LoRANSPTrainer:
             pbar.set_postfix({
                 'Loss': f"{ema_loss:.3f}",
                 'CE': f"{ce_loss.item():.3f}",
+                'Aux': f"{l_aux_val:.3f}",
                 'FD': f"{l_fd_val:.3f}",
                 'CD': f"{l_cd_val:.3f}",
                 'Acc': f"{ema_acc:.1f}%"
@@ -349,9 +375,11 @@ class LoRANSPTrainer:
 
             step = i + 1
             if step % 50 == 0 or step == self.args.iterations:
-                logging.info(f"Iter[{step:03d}/{self.args.iterations}] | "
-                             f"Loss: {ema_loss:.4f} | CE: {ce_loss.item():.4f} | "
-                             f"FD: {l_fd_val:.4f} | CD: {l_cd_val:.4f} | Acc: {ema_acc:.2f}%")
+                log_msg = (f"Iter[{step:03d}/{self.args.iterations}] | "
+                           f"Loss: {ema_loss:.4f} | CE: {ce_loss.item():.4f} | "
+                           f"Aux: {l_aux_val:.4f} | "
+                           f"FD: {l_fd_val:.4f} | CD: {l_cd_val:.4f} | Acc: {ema_acc:.2f}%")
+                logging.info(log_msg)
 
             if eval_interval > 0 and step % eval_interval == 0 and eval_callback is not None:
                 self.model.eval()
