@@ -21,9 +21,13 @@
 
 ```
 chat-history/
-├── 2026-05-23-project-overview.md        # 项目首次阅读记录
-├── 2026-05-23-agents-md-creation.md      # AGENTS.md 创建记录
-└── {YYYY-MM-DD}-{简短主题}.md             # 你创建的新记录
+├── 2026-05-23-01-project-overview.md        # 项目首次阅读记录
+├── 2026-05-23-02-agents-md-creation.md      # AGENTS.md 创建记录
+├── 2026-05-23-03-paper-writing-and-lada-baseline.md  # 论文写作与LADA基线
+├── 2026-05-23-04-git-workflow-and-gitignore.md      # Git提交策略与.gitignore清理
+├── 2026-05-23-05-server-workflow-and-repo-rename.md # 服务器工作流与仓库重命名
+├── 2026-05-23-06-chat-history-naming-convention.md # 文件命名规范统一
+└── {YYYY-MM-DD}-{seq}-{topic}.md             # 你创建的新记录
 ```
 
 内容模板：
