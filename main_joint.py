@@ -303,34 +303,39 @@ def main(args):
                      f"RGDA: {rgda_acc:5.1f}% | Ensemble: {ens_acc:5.1f}%")
 
     # ========== 5. 评估 OOD 数据集 ==========
-    logging.info("\n=== Evaluating OOD Datasets ===")
+    logging.info("\n=== Evaluating OOD Datasets (Zero-shot only, RGDA/Ensemble inapplicable) ===")
     ood_zs_accs = []
     ood_rgda_accs = []
     ood_ens_accs = []
 
     for d_name in args.ood_datasets:
         if d_name in id_dataset_offset:
-            # OOD 数据集同时也是 ID 数据集：使用现有的分类器
-            ood_eval_offset = id_dataset_offset[d_name]
-            c_len = id_dataset_nclasses[d_name]
-            ood_zeroshot_classifier = zeroshot_classifier
+            # OOD 同时也是 ID 数据集：复用 ID 分类器
+            zs_acc, rgda_acc, ens_acc, _, _ = evaluate_dataset(
+                args, d_name, model, zeroshot_classifier, lr_rgda_classifier,
+                num_id_classes, id_dataset_offset[d_name]
+            )
         else:
-            # 对于 novel OOD 数据集：用该数据集自身的类别名构建零样本分类器
-            _, _, _, ood_c_names = get_xtail_trainloader(
+            # 对于 novel OOD 数据集：用该数据集自身的类别名构建零样本分类器直接评估
+            _, test_transform = get_transforms(d_name)
+            _, te_loader, _, ood_c_names = get_xtail_trainloader(
                 root=args.root, dataset_name=d_name,
-                transform_train=None, transform_test=None,
+                transform_train=None, transform_test=test_transform,
                 num_shots=args.num_shots, batch_size=args.batch_size
             )
-            c_len = len(ood_c_names)
-            ood_eval_offset = 0
-            ood_zeroshot_classifier = get_zeroshot_classifier(
-                model, processor, ood_c_names, args.device
-            )
+            from src.utils.feature_extractor import extract_features
+            features, labels = extract_features(model, te_loader, args.device)
+            features = features / features.norm(dim=-1, keepdim=True)
 
-        zs_acc, rgda_acc, ens_acc, _, _ = evaluate_dataset(
-            args, d_name, model, ood_zeroshot_classifier, lr_rgda_classifier,
-            num_id_classes, ood_eval_offset
-        )
+            ood_zeroshot = get_zeroshot_classifier(model, processor, ood_c_names, args.device)
+            with torch.no_grad():
+                zs_logits = features @ ood_zeroshot
+                zs_logits_norm = zs_logits - zs_logits.max(dim=-1, keepdim=True).values
+                zs_preds = zs_logits_norm.argmax(dim=1)
+                zs_acc = zs_preds.eq(labels.to(args.device)).float().mean().item() * 100
+            rgda_acc = 0.0
+            ens_acc = 0.0
+
         ood_zs_accs.append(zs_acc)
         ood_rgda_accs.append(rgda_acc)
         ood_ens_accs.append(ens_acc)
