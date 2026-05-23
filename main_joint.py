@@ -143,10 +143,9 @@ def parse_args():
 
     args = parser.parse_args()
 
-    # 解析设备：优先 --device，否则用 --gpu 设置 CUDA_VISIBLE_DEVICES
+    # 解析设备：优先 --device，否则用 --gpu 指定 cuda:N
     if args.device is None:
-        os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
-        args.device = "cuda" if torch.cuda.is_available() else "cpu"
+        args.device = f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu"
 
     # 自动计算 OOD 数据集为 X-TAIL 补集
     if args.ood_datasets is None:
