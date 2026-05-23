@@ -28,8 +28,8 @@ from transformers import CLIPModel, CLIPProcessor
 from src.detectors.ood_detector import (
     ClassifierBasedOODDetector, 
     MahalanobisOODDetector, 
-    build_stats_dict_from_features
 )
+from src.classifiers.gaussian_statistics import build_stats_dict_from_features
 from src.utils.evaluation import calculate_ood_metrics
 from utils_data import get_xtail_trainloader, get_xtail_testloader, get_transforms
 

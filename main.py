@@ -140,11 +140,8 @@ def main(args):
     if args.seed is not None:
         fix_random_seed(args.seed)
 
-    # [修改点] 将工具函数定义挪到 main 函数最前方，确保模式一和模式二都能调用，防止报错
-    # [修改点] 适配全量和增量两种矩阵形状
     def get_full_stats(matrix):
         num_rows = len(matrix)
-        # 如果只有一行（联合微调），Transfer/Average/Last 就是这一行本身
         if num_rows == 1:
             data_row = matrix[0]
             return {
@@ -157,14 +154,23 @@ def main(args):
                 "last_total_avg": sum(data_row) / len(data_row)
             }
         else:
-            # 增量学习逻辑 (多行矩阵)
-            trans = [matrix[k][k] for k in range(num_rows)]
-            lasts = matrix[-1]
-            avgs = [sum(matrix[i][j] for i in range(j, num_rows)) / (num_rows - j) for j in range(num_rows)]
+            K = num_rows
+            trans = []
+            for k in range(K):
+                if k == 0:
+                    trans.append(0.0)
+                else:
+                    trans.append(sum(matrix[j][k] for j in range(k)) / k)
+            transfer_values = [trans[k] for k in range(1, K)]
+            transfer_total_avg = sum(transfer_values) / len(transfer_values)
+            avgs = [sum(matrix[j][k] for j in range(K)) / K for k in range(K)]
+            average_total_avg = sum(avgs) / K
+            lasts = [matrix[K-1][k] for k in range(K)]
+            last_total_avg = sum(lasts) / K
             return {
-                "raw_matrix": matrix, "transfer": trans, "transfer_total_avg": sum(trans) / num_rows,
-                "average_per_task": avgs, "average_total_avg": sum(avgs) / num_rows,
-                "last": lasts, "last_total_avg": sum(lasts) / num_rows
+                "raw_matrix": matrix, "transfer": trans, "transfer_total_avg": transfer_total_avg,
+                "average_per_task": avgs, "average_total_avg": average_total_avg,
+                "last": lasts, "last_total_avg": last_total_avg
             }
 
     def print_paper_metrics(matrix, name, headers):
@@ -173,7 +179,6 @@ def main(args):
         
         print(f"\n" + "-"*110)
         print(f"[{name} 指标报告]")
-        # 自动截取对应的表头
         header_str = " | ".join([f"{h[:8]:<8}" for h in headers[:num_cols]])
         print(f"指标类型   | " + header_str + " | [平均总分]")
         print("-" * 110)
@@ -257,8 +262,8 @@ def main(args):
         
         all_features = torch.cat(all_features)
         all_labels = torch.cat(all_labels)
-        
-        from src.detectors.ood_detector import build_stats_dict_from_features
+        from src.classifiers.gaussian_statistics import build_stats_dict_from_features
+
         stats_dict = build_stats_dict_from_features(all_features, all_labels)
         
         # 4. 构建分类器
@@ -387,8 +392,8 @@ def main(args):
             
             task_features = torch.cat(task_features)
             task_labels = torch.cat(task_labels)
-            
-            from src.detectors.ood_detector import build_stats_dict_from_features
+            from src.classifiers.gaussian_statistics import build_stats_dict_from_features
+
             task_stats_dict = build_stats_dict_from_features(task_features, task_labels)
             
             # 累加统计字典
@@ -446,12 +451,19 @@ def main(args):
         # [修改点]  提取数据集名称作为表头
         task_names = [d[0] for d in args.dataset_sequence]
 
-        # [修改点]  增强版的打印函数：带表头，更美观
         def print_paper_metrics(matrix, name, headers):
-            num_tasks = len(matrix)
-            transfers = [matrix[k][k] for k in range(num_tasks)]
-            lasts = matrix[-1]
-            averages = [sum(matrix[i][j] for i in range(j, num_tasks)) / (num_tasks - j) for j in range(num_tasks)]
+            K = len(matrix)
+            transfers = []
+            for k in range(K):
+                if k == 0:
+                    transfers.append(0.0)
+                else:
+                    transfers.append(sum(matrix[j][k] for j in range(k)) / k)
+            transfer_total = sum(transfers[1:]) / (K-1)
+            lasts = [matrix[K-1][k] for k in range(K)]
+            last_total = sum(lasts) / K
+            averages = [sum(matrix[j][k] for j in range(K)) / K for k in range(K)]
+            average_total = sum(averages) / K
             
             print(f"\n" + "-"*100)
             print(f"[{name} 分类器指标报告]")
@@ -459,9 +471,9 @@ def main(args):
             print(f"指标类型   | " + "  |  ".join([f"{h[:8]:<8}" for h in headers]) + " | [平均总分]")
             print("-" * 100)
             
-            print(f"Transfer  | " + "  |  ".join([f"{x:8.1f}" for x in transfers]) + f" | [{sum(transfers)/num_tasks:.1f}]")
-            print(f"Average   | " + "  |  ".join([f"{x:8.1f}" for x in averages])  + f" | [{sum(averages)/num_tasks:.1f}]")
-            print(f"Last      | " + "  |  ".join([f"{x:8.1f}" for x in lasts])     + f" | [{sum(lasts)/num_tasks:.1f}]")
+            print(f"Transfer  | " + "  |  ".join([f"{x:8.1f}" for x in transfers]) + f" | [{transfer_total:.1f}]")
+            print(f"Average   | " + "  |  ".join([f"{x:8.1f}" for x in averages])  + f" | [{average_total:.1f}]")
+            print(f"Last      | " + "  |  ".join([f"{x:8.1f}" for x in lasts])     + f" | [{last_total:.1f}]")
             print("-" * 100)
 
         # 打印三组结果
@@ -470,22 +482,27 @@ def main(args):
         print_paper_metrics(acc_matrix_ens, f"Ours Ensemble (alpha={args.alpha})", task_names)
 
 
-        # [修改点] 3. 增强版的 JSON 保存逻辑：包含表头和所有平均值
-
-
         def get_full_stats(matrix):
-            num_tasks = len(matrix)
-            trans = [matrix[k][k] for k in range(num_tasks)]
-            lasts = matrix[-1]
-            avgs = [sum(matrix[i][j] for i in range(j, num_tasks)) / (num_tasks - j) for j in range(num_tasks)]
+            K = len(matrix)
+            trans = []
+            for k in range(K):
+                if k == 0:
+                    trans.append(0.0)
+                else:
+                    trans.append(sum(matrix[j][k] for j in range(k)) / k)
+            transfer_total_avg = sum(trans[1:]) / (K-1)
+            avgs = [sum(matrix[j][k] for j in range(K)) / K for k in range(K)]
+            average_total_avg = sum(avgs) / K
+            lasts = [matrix[K-1][k] for k in range(K)]
+            last_total_avg = sum(lasts) / K
             return {
                 "raw_matrix": matrix,
                 "transfer": trans,
-                "transfer_total_avg": sum(trans) / num_tasks,
+                "transfer_total_avg": transfer_total_avg,
                 "average_per_task": avgs,
-                "average_total_avg": sum(avgs) / num_tasks,
+                "average_total_avg": average_total_avg,
                 "last": lasts,
-                "last_total_avg": sum(lasts) / num_tasks
+                "last_total_avg": last_total_avg
             }
 
         save_results = {

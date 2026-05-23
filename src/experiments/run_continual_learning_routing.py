@@ -22,10 +22,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 
 from transformers import CLIPModel, CLIPProcessor
 from src.classifiers.lr_rgda_classifier import LRRGDAClassifier, EnsembleClassifier
-from src.detectors.ood_detector import ClassifierBasedOODDetector, MahalanobisOODDetector, build_stats_dict_from_features
+from src.detectors.ood_detector import ClassifierBasedOODDetector, MahalanobisOODDetector
+from src.classifiers.gaussian_statistics import build_stats_dict_from_features
 from src.routing.adaptive_router import AdaptiveRouter
 from src.utils.evaluation import calculate_ood_metrics, calculate_classification_accuracy
-from src.utils.continual_metrics import ContinualLearningMetrics, calculate_forgetting
+from src.utils.continual_metrics import ContinualLearningMetrics
 from utils_data import get_xtail_trainloader, get_xtail_testloader, get_transforms
 
 
@@ -451,10 +452,6 @@ def run_continual_learning_with_routing(args):
     print("="*80)
     metrics_tracker.print_summary()
     
-    # 计算遗忘率
-    forgetting_rate = calculate_forgetting(metrics_tracker.get_accuracy_matrix())
-    print(f"\nForgetting Rate: {forgetting_rate:.1f}%")
-    
     # 保存最终结果
     final_results = {
         'method': args.method,
@@ -462,7 +459,6 @@ def run_continual_learning_with_routing(args):
         'ood_detector_type': args.ood_detector_type,
         'ood_threshold': args.ood_threshold,
         'metrics': metrics_tracker.get_summary(),
-        'forgetting_rate': float(forgetting_rate),
         'accuracy_matrix': metrics_tracker.get_accuracy_matrix().tolist(),
         'step_results': step_results
     }

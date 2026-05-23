@@ -25,7 +25,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from transformers import CLIPModel, CLIPProcessor
 from src.classifiers.lr_rgda_classifier import LRRGDAClassifier, EnsembleClassifier
-from src.detectors.ood_detector import ClassifierBasedOODDetector, MahalanobisOODDetector, build_stats_dict_from_features
+from src.detectors.ood_detector import ClassifierBasedOODDetector, MahalanobisOODDetector
+from src.classifiers.gaussian_statistics import build_stats_dict_from_features
 from src.routing.adaptive_router import AdaptiveRouter
 from utils_data import get_xtail_trainloader, get_xtail_testloader, get_transforms
 

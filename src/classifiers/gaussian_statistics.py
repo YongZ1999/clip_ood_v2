@@ -1,4 +1,6 @@
 import torch
+from typing import Dict
+from tqdm import tqdm
 
 def cholesky_stable(matrix: torch.Tensor, reg: float = 1e-5) -> torch.Tensor:
     if matrix.dim() == 3:
@@ -111,3 +113,100 @@ class LowRankGaussianStatistics:
         """Efficient sampling without forming full covariance"""
         eps = torch.randn(n_samples, self.L.size(1), device=self.L.device, dtype=self.L.dtype)
         return self.mean.unsqueeze(0) + eps @ self.L.T  # (n_samples, d)
+
+
+def build_stats_dict_from_features(
+    features: torch.Tensor,
+    labels: torch.Tensor
+) -> Dict[int, 'GaussianStatistics']:
+    """
+    从特征和标签构建类别统计分布字典
+
+    Args:
+        features: 特征向量 [N, D]
+        labels: 标签 [N]
+
+    Returns:
+        类别统计分布字典 {class_id: GaussianStatistics}
+    """
+    unique_classes = torch.unique(labels)
+    stats_dict = {}
+
+    for c in unique_classes:
+        idx = (labels == c)
+        data_c = features[idx]
+        mu = torch.mean(data_c, dim=0)
+        if data_c.shape[0] > 1:
+            cov = torch.cov(data_c.T)
+        else:
+            cov = torch.eye(data_c.shape[1], device=data_c.device)
+
+        stats_dict[int(c)] = GaussianStatistics(mu, cov)
+
+    return stats_dict
+
+
+def extract_stats_dict_from_model(
+    model,
+    dataset_names: list,
+    args,
+    device: str = "cuda"
+) -> Dict[int, 'GaussianStatistics']:
+    """
+    从数据集和模型提取类别统计分布
+
+    Args:
+        model: CLIP模型或其他特征提取器
+        dataset_names: 数据集名称列表
+        args: 参数对象，需包含root, num_shots等
+        device: 计算设备
+
+    Returns:
+        类别统计分布字典 {class_id: GaussianStatistics}
+    """
+    from utils_data import get_xtail_trainloader, get_transforms
+
+    model.eval()
+    stats_dict = {}
+    label_offset = 0
+
+    for d_name in dataset_names:
+        transform, _ = get_transforms(d_name)
+        tr_loader, _, _, c_names = get_xtail_trainloader(
+            root=args.root,
+            dataset_name=d_name,
+            transform_train=transform,
+            transform_test=None,
+            num_shots=args.num_shots,
+            batch_size=32
+        )
+
+        all_feats = []
+        all_labels = []
+
+        with torch.no_grad():
+            for imgs, lbls in tqdm(tr_loader, desc=f"Extracting {d_name}", leave=False):
+                imgs = imgs.to(device)
+                feats = model.get_image_features(imgs)
+                feats = feats / feats.norm(dim=-1, keepdim=True)
+                all_feats.append(feats.cpu())
+                all_labels.append(lbls + label_offset)
+
+        all_feats = torch.cat(all_feats)
+        all_labels = torch.cat(all_labels)
+
+        unique_labels = torch.unique(all_labels)
+        for c in unique_labels:
+            idx = (all_labels == c)
+            data_c = all_feats[idx]
+            mu = torch.mean(data_c, dim=0)
+            if data_c.shape[0] > 1:
+                cov = torch.cov(data_c.T)
+            else:
+                cov = torch.eye(data_c.shape[1])
+
+            stats_dict[int(c)] = GaussianStatistics(mu, cov)
+
+        label_offset += len(c_names)
+
+    return stats_dict

@@ -217,7 +217,7 @@ def batch_evaluate_datasets(
 
 def get_full_stats(matrix):
     """
-    从准确率矩阵计算 Transfer/Average/Last 指标
+    从准确率矩阵计算 Transfer/Average/Last 指标（LADA 论文定义）
 
     Args:
         matrix: 二维列表
@@ -230,7 +230,6 @@ def get_full_stats(matrix):
     """
     num_rows = len(matrix)
     if num_rows == 1:
-        # 联合微调：只有一行，所有指标相同
         data_row = matrix[0]
         return {
             "raw_matrix": matrix,
@@ -242,19 +241,35 @@ def get_full_stats(matrix):
             "last_total_avg": sum(data_row) / len(data_row)
         }
     else:
-        # 增量学习：多行矩阵
-        trans = [matrix[k][k] for k in range(num_rows)]
-        lasts = matrix[-1]
-        avgs = [sum(matrix[i][j] for i in range(j, num_rows)) / (num_rows - j)
-                for j in range(num_rows)]
+        K = num_rows
+        # Transfer_k = mean of accuracy on task k before it was trained
+        # For k=0 (first task): no Transfer defined
+        trans = []
+        for k in range(K):
+            if k == 0:
+                trans.append(0.0)  # placeholder for display
+            else:
+                trans.append(sum(matrix[j][k] for j in range(k)) / k)
+        # Transfer = mean of Transfer_k for k=2..K (K-1 values)
+        transfer_values = [trans[k] for k in range(1, K)]
+        transfer_total_avg = sum(transfer_values) / len(transfer_values)
+
+        # Average_k = mean across ALL training steps for task k
+        avgs = [sum(matrix[j][k] for j in range(K)) / K for k in range(K)]
+        average_total_avg = sum(avgs) / K
+
+        # Last_k = accuracy on task k after all K tasks trained
+        lasts = [matrix[K-1][k] for k in range(K)]
+        last_total_avg = sum(lasts) / K
+
         return {
             "raw_matrix": matrix,
             "transfer": trans,
-            "transfer_total_avg": sum(trans) / num_rows,
+            "transfer_total_avg": transfer_total_avg,
             "average_per_task": avgs,
-            "average_total_avg": sum(avgs) / num_rows,
+            "average_total_avg": average_total_avg,
             "last": lasts,
-            "last_total_avg": sum(lasts) / num_rows
+            "last_total_avg": last_total_avg
         }
 
 

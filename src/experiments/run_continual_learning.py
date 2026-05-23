@@ -15,7 +15,7 @@ from typing import List, Dict
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 
 from src.models.trainer import Trainer
-from src.utils.continual_metrics import ContinualLearningMetrics, calculate_forgetting
+from src.utils.continual_metrics import ContinualLearningMetrics
 from utils_data import get_xtail_trainloader, get_xtail_testloader, get_transforms
 
 
@@ -236,17 +236,12 @@ def run_continual_learning(args):
     print("="*80)
     metrics_tracker.print_summary()
     
-    # 计算遗忘率
-    forgetting_rate = calculate_forgetting(metrics_tracker.get_accuracy_matrix())
-    print(f"\nForgetting Rate: {forgetting_rate:.1f}%")
-    
     # 保存最终结果
     final_results = {
         'args': {k: str(v) if not isinstance(v, (int, float, bool, list, dict)) else v 
                  for k, v in vars(args).items()},
         'metrics': metrics_tracker.get_summary(),
         'per_task_metrics': metrics_tracker.calculate_per_task_metrics(),
-        'forgetting_rate': float(forgetting_rate),
         'accuracy_matrix': metrics_tracker.get_accuracy_matrix().tolist()
     }
     

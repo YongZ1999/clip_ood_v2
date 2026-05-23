@@ -26,7 +26,7 @@ from torch.utils.data import DataLoader, ConcatDataset
 
 from src.trainers.lora_nsp_trainer import LoRANSPTrainer
 from src.classifiers.lr_rgda_classifier import LRRGDAClassifier
-from src.detectors.ood_detector import build_stats_dict_from_features
+from src.classifiers.gaussian_statistics import build_stats_dict_from_features
 from src.utils.reference_loader import load_reference_dataset
 from src.utils.main_utils import (
     fix_random_seed,
