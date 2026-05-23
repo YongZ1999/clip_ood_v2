@@ -79,8 +79,8 @@ def parse_args():
     # LoRA 相关参数
     parser.add_argument("--lora_rank", type=int, default=4,
                         help="Rank for LoRA adaptation.")
-    parser.add_argument("--lora_type", type=str, default="lora_nsp",
-                        choices=["lora_sgp", "lora_nsp"],
+    parser.add_argument("--lora_type", type=str, default="lora_vanilla",
+                        choices=["lora_vanilla", "lora_sgp", "lora_nsp"],
                         help="Type of LoRA adaptation.")
     parser.add_argument("--nsp_eps", type=float, default=0.05,
                         help="Epsilon parameter for NSP.")
@@ -115,7 +115,7 @@ def parse_args():
     # LR-RGDA 构建参数
     parser.add_argument("--rgda_rank", type=int, default=32,
                         help="Rank for LR-RGDA low-rank decomposition.")
-    parser.add_argument("--rgda_alpha1", type=float, default=0.3,
+    parser.add_argument("--rgda_alpha1", type=float, default=0.2,
                         help="qda_reg_alpha1 for LR-RGDA.")
     parser.add_argument("--rgda_alpha2", type=float, default=2.0,
                         help="qda_reg_alpha2 for LR-RGDA.")

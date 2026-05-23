@@ -23,7 +23,7 @@ def load_reference_dataset(args, model_pretrain, processor, device):
     加载并缓存参考数据集（Flickr8K）用于蒸馏
     Returns: DataLoader or None
     """
-    if args.iterations == 0 or args.reference_dataset != "flickr8k":
+    if args.reference_dataset != "flickr8k":
         print("Skipping reference dataset loading.")
         return None
     

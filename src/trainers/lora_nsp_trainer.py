@@ -244,12 +244,17 @@ class LoRANSPTrainer:
 
         logging.info(f"✓ Task finalized: LoRA weights merged to main weights and reset.")
     
-    def train(self, train_loader, class_names, reference_loader):
+    def train(self, train_loader, class_names, reference_loader,
+              eval_interval: int = 0, eval_callback=None):
         """
         训练模型
-        
-        注意：在增量学习场景中，应在训练前调用 update_covariance_history
-        以应用历史零空间约束
+
+        Args:
+            train_loader: 训练数据加载器
+            class_names: 类别名称列表
+            reference_loader: 参考数据集加载器（用于蒸馏）
+            eval_interval: 每 N 步调用一次 eval_callback（0 表示不调用）
+            eval_callback: 回调函数 fn(model, step)，在 eval_interval 步时调用
         """
         # 预计算零样本分类器权重
         templates = [lambda x: f"a photo of a {x}."]
@@ -269,80 +274,90 @@ class LoRANSPTrainer:
         self.model.train()
         train_iter = iter(train_loader)
         ref_iter = iter(reference_loader) if reference_loader is not None else None
-        
-        #[修改点: 将 tqdm 实例化为 pbar，方便后续动态更新进度条信息]
+
+        ema_loss = None
+        ema_acc = None
+        ema_momentum = 0.95
+
         pbar = tqdm(range(self.args.iterations), desc="Training")
         for i in pbar:
-            # 获取批次
             try:
                 images, labels = next(train_iter)
             except StopIteration:
                 train_iter = iter(train_loader)
                 images, labels = next(train_iter)
-            
+
             images = images.to(self.device)
             labels = labels.to(self.device)
-            
-            # 前向传播
+
             img_feats = self.encode_image(images)
             img_feats = img_feats / img_feats.norm(dim=-1, keepdim=True)
-            
+
             logits = logit_scale.exp() * (img_feats @ classifier)
             ce_loss = F.cross_entropy(logits, labels, label_smoothing=0.1)
             loss = ce_loss
-            
-            #[修改点: 动态计算当前 batch 的训练准确度]
+
             preds = logits.argmax(dim=-1)
             train_acc = (preds == labels).float().mean().item() * 100
-            
-            # [修改点: 初始化记录用的蒸馏损失]
+
             l_fd_val, l_cd_val = 0.0, 0.0
-            
-            # 蒸馏损失
+
             if reference_loader is not None and ref_iter is not None:
                 try:
                     r_imgs, _, t_img_f, t_txt_f = next(ref_iter)
                 except StopIteration:
                     ref_iter = iter(reference_loader)
                     r_imgs, _, t_img_f, t_txt_f = next(ref_iter)
-                
+
                 r_imgs = r_imgs.to(self.device)
                 t_img_f = t_img_f.to(self.device)
                 t_txt_f = t_txt_f.to(self.device)
-                
+
                 s_img_f = self.encode_image(r_imgs)
                 s_img_f = s_img_f / s_img_f.norm(dim=-1, keepdim=True)
-                
+
                 l_fd = feature_distillation_loss(t_img_f, s_img_f)
                 l_cd = cross_modal_distillation_loss(logit_scale, s_img_f, t_txt_f, t_img_f, t_txt_f, 2.0)
-                
-                #[修改点: 提取 item() 用于日志记录]
+
                 l_fd_val = l_fd.item()
                 l_cd_val = l_cd.item()
-                
+
                 loss += self.args.fd_weight * l_fd + self.args.cd_weight * l_cd
-            
-            # 反向传播
+
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
             scheduler.step()
-            
-            # [修改点: 在进度条后面动态滚动显示损失和准确率]
+
+            loss_val = loss.item()
+
+            # EMA 更新
+            if ema_loss is None:
+                ema_loss = loss_val
+                ema_acc = train_acc
+            else:
+                ema_loss = ema_momentum * ema_loss + (1 - ema_momentum) * loss_val
+                ema_acc = ema_momentum * ema_acc + (1 - ema_momentum) * train_acc
+
             pbar.set_postfix({
-                'Loss': f"{loss.item():.3f}",
+                'Loss': f"{ema_loss:.3f}",
                 'CE': f"{ce_loss.item():.3f}",
                 'FD': f"{l_fd_val:.3f}",
                 'CD': f"{l_cd_val:.3f}",
-                'Acc': f"{train_acc:.1f}%"
+                'Acc': f"{ema_acc:.1f}%"
             })
-            
-            #[修改点: 每 50 步或训练结束时，使用 logging 保存文本日志]
-            if (i + 1) % 50 == 0 or (i + 1) == self.args.iterations:
-                logging.info(f"Iter[{i+1:03d}/{self.args.iterations}] | "
-                             f"Loss: {loss.item():.4f} | CE: {ce_loss.item():.4f} | "
-                             f"FD: {l_fd_val:.4f} | CD: {l_cd_val:.4f} | Acc: {train_acc:.2f}%")
-        
+
+            step = i + 1
+            if step % 50 == 0 or step == self.args.iterations:
+                logging.info(f"Iter[{step:03d}/{self.args.iterations}] | "
+                             f"Loss: {ema_loss:.4f} | CE: {ce_loss.item():.4f} | "
+                             f"FD: {l_fd_val:.4f} | CD: {l_cd_val:.4f} | Acc: {ema_acc:.2f}%")
+
+            if eval_interval > 0 and step % eval_interval == 0 and eval_callback is not None:
+                self.model.eval()
+                eval_callback(self.model, step)
+                self.model.train()
+
         return self.model
     
     def evaluate(self, test_loader, class_names):

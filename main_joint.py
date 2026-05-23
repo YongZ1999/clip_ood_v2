@@ -9,11 +9,7 @@
 3. 保存结果 JSON
 
 用法示例：
-    python main_joint.py \\
-        --id_datasets aircraft caltech101 dtd eurosat flowers food101 mnist oxford_pets stanford_cars sun397 \\
-        --ood_datasets dtd eurosat mnist sun397 \\
-        --num_shots 16 --batch_size 32 --iterations 800 \\
-        --lora_type lora_nsp --alpha 0.5
+    python main_joint.py --id_datasets ALL --iterations 5000 --alpha 0.5
 """
 
 import os
@@ -88,8 +84,8 @@ def parse_args():
     # LoRA 相关参数
     parser.add_argument("--lora_rank", type=int, default=4,
                         help="Rank for LoRA adaptation.")
-    parser.add_argument("--lora_type", type=str, default="lora_nsp",
-                        choices=["lora_sgp", "lora_nsp"],
+    parser.add_argument("--lora_type", type=str, default="lora_vanilla",
+                        choices=["lora_vanilla", "lora_sgp", "lora_nsp"],
                         help="Type of LoRA adaptation.")
     parser.add_argument("--nsp_eps", type=float, default=0.05,
                         help="Epsilon parameter for NSP.")
@@ -101,9 +97,9 @@ def parse_args():
     parser.add_argument("--weight_p", type=float, default=1.0,
                         help="P parameter for weight function.")
 
-    # 参考数据集参数
-    parser.add_argument("--reference_dataset", type=str, default="flickr8k",
-                        help="Reference dataset for training.")
+    # 参考数据集参数（默认不使用蒸馏）
+    parser.add_argument("--reference_dataset", type=str, default="",
+                        help="Reference dataset for distillation. Set to 'flickr8k' to enable.")
     parser.add_argument("--reference_batch_size", type=int, default=32,
                         help="Batch size for reference dataset.")
     parser.add_argument("--num_workers", type=int, default=4,
@@ -134,7 +130,7 @@ def parse_args():
     # LR-RGDA 构建参数
     parser.add_argument("--rgda_rank", type=int, default=32,
                         help="Rank for LR-RGDA low-rank decomposition.")
-    parser.add_argument("--rgda_alpha1", type=float, default=0.3,
+    parser.add_argument("--rgda_alpha1", type=float, default=0.2,
                         help="qda_reg_alpha1 for LR-RGDA.")
     parser.add_argument("--rgda_alpha2", type=float, default=2.0,
                         help="qda_reg_alpha2 for LR-RGDA.")
@@ -172,7 +168,81 @@ def main(args):
 
     tune_student = args.tune_student
 
-    # ========== 2. 微调模型（可选） ==========
+    # ========== 2. 完整评估函数（中间评估 + 最终评估共用）==========
+    def run_full_evaluation(eval_model, tag=""):
+        logging.info(f"\n=== Extracting Features for LR-RGDA {tag}===")
+        all_feats = []
+        all_lbls = []
+        feat_offset = 0
+
+        for d_name in args.id_datasets:
+            train_transform, _ = get_transforms(d_name)
+            tr_loader, _, _, c_names = get_xtail_trainloader(
+                root=args.root, dataset_name=d_name,
+                transform_train=train_transform, transform_test=None,
+                num_shots=args.num_shots, batch_size=args.batch_size
+            )
+            from src.utils.feature_extractor import extract_features
+            features, labels = extract_features(eval_model, tr_loader, args.device)
+            features = features / features.norm(dim=-1, keepdim=True)
+            all_feats.append(features)
+            all_lbls.append(labels + feat_offset)
+            feat_offset += len(c_names)
+
+        all_features = torch.cat(all_feats)
+        all_labels = torch.cat(all_lbls)
+
+        stats_dict = build_stats_dict_from_features(all_features, all_labels)
+
+        lr_rgda_classifier = LRRGDAClassifier(
+            stats_dict=stats_dict, device=args.device,
+            rank=args.rgda_rank,
+            qda_reg_alpha1=args.rgda_alpha1,
+            qda_reg_alpha2=args.rgda_alpha2,
+            qda_reg_alpha3=args.rgda_alpha3,
+            temperature=1.0
+        )
+
+        num_id_classes = len(all_class_names)
+        zs_classifier = get_zeroshot_classifier(eval_model, processor,
+                                                 all_class_names, args.device)
+
+        logging.info(f"\n=== Evaluating ID Datasets {tag}===")
+        id_zs, id_rgda, id_ens = [], [], []
+
+        id_dataset_offset_map = {}
+        eval_offset = 0
+        for d_name in args.id_datasets:
+            _, _, _, c_names = get_xtail_trainloader(
+                root=args.root, dataset_name=d_name,
+                transform_train=None, transform_test=None,
+                num_shots=args.num_shots, batch_size=args.batch_size
+            )
+            id_dataset_offset_map[d_name] = eval_offset
+            eval_offset += len(c_names)
+
+        eval_offset = 0
+        for d_name in args.id_datasets:
+            zs_acc, rgda_acc, ens_acc, c_len, _ = evaluate_dataset(
+                args, d_name, eval_model, zs_classifier, lr_rgda_classifier,
+                num_id_classes, eval_offset
+            )
+            id_zs.append(zs_acc)
+            id_rgda.append(rgda_acc)
+            id_ens.append(ens_acc)
+            eval_offset += c_len
+            logging.info(f"[{tag} ID] {d_name:<12s} | ZS: {zs_acc:5.1f}% | "
+                         f"RGDA: {rgda_acc:5.1f}% | Ensemble: {ens_acc:5.1f}%")
+
+        id_zs_avg = sum(id_zs) / len(id_zs)
+        id_rgda_avg = sum(id_rgda) / len(id_rgda)
+        id_ens_avg = sum(id_ens) / len(id_ens)
+        logging.info(f"[{tag} ID Average] ZS: {id_zs_avg:.1f}% | "
+                     f"RGDA: {id_rgda_avg:.1f}% | Ensemble: {id_ens_avg:.1f}%")
+
+        return (id_zs, id_rgda, id_ens, id_zs_avg, id_rgda_avg, id_ens_avg,
+                id_dataset_offset_map, num_id_classes, zs_classifier, lr_rgda_classifier)
+
     all_class_names = []
     if tune_student:
         # 只有在微调时才加载参考数据集
@@ -208,24 +278,47 @@ def main(args):
             current_offset += len(c_names)
 
         merged_dataset = ConcatDataset(all_shifted_datasets)
-        merged_loader = DataLoader(merged_dataset, batch_size=args.batch_size, shuffle=True)
+        merged_loader = DataLoader(merged_dataset, batch_size=args.batch_size, shuffle=True, num_workers=6)
 
         # 2b. 训练模型
         logging.info("\n=== Training (Joint Fine-tuning) ===")
-        model = trainer.train(merged_loader, all_class_names, reference_loader)
-
-        # 2c. 合并 LoRA 权重
-        logging.info("\n=== Merging LoRA Weights for Joint Evaluation ===")
-        trainer.finalize_task_for_incremental()
-
-        # 2d. 保存 checkpoint
         checkpoint_dir = f"experiments/checkpoints/joint_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         os.makedirs(checkpoint_dir, exist_ok=True)
-        checkpoint_path = os.path.join(checkpoint_dir, "final_model.pt")
-        trainer.save_checkpoint(checkpoint_path, all_class_names)
-        logging.info(f"\nCheckpoint saved to: {checkpoint_path}")
+
+        # 预计算零样本分类器和各数据集的标签偏移，用于中间评估
+        zs_for_eval = get_zeroshot_classifier(model, processor, all_class_names, args.device)
+        dataset_offsets = {}
+        offset = 0
+        for d_name in args.id_datasets:
+            dataset_offsets[d_name] = offset
+            _, _, _, c_names = get_xtail_trainloader(
+                root=args.root, dataset_name=d_name,
+                transform_train=None, transform_test=None,
+                num_shots=args.num_shots, batch_size=args.batch_size
+            )
+            offset += len(c_names)
+
+        def eval_callback(current_model, step):
+            logging.info(f"\n{'='*60}")
+            logging.info(f"Intermediate Evaluation at Iter {step}")
+            logging.info(f"{'='*60}")
+            run_full_evaluation(current_model, tag=f"Iter {step}")
+
+        model = trainer.train(merged_loader, all_class_names, reference_loader,
+                              eval_interval=500, eval_callback=eval_callback)
+
+        # 2c. 合并 LoRA 权重（训练结束后只需一次）
+        logging.info("\n=== Merging LoRA Weights for Joint Evaluation ===")
+        trainer.finalize_task_for_incremental()
+        logging.info(f"\nCheckpoints saved to: {checkpoint_dir}")
+
+        # 训练完成后执行完整评估（使用合并后的模型）
+        (id_zs_accs, id_rgda_accs, id_ens_accs,
+         id_zs_avg, id_rgda_avg, id_ens_avg,
+         id_dataset_offset, num_id_classes,
+         zeroshot_classifier, lr_rgda_classifier) = run_full_evaluation(model, tag="Final")
+
     else:
-        # 不微调，仅获取类别名
         logging.info("\n=== Skipping Fine-tuning (tune_student=False) ===")
         for d_name in args.id_datasets:
             _, _, _, c_names = get_xtail_trainloader(
@@ -235,78 +328,12 @@ def main(args):
             )
             all_class_names.extend(c_names)
 
-    # ========== 3. 提取特征，构建 LR-RGDA 分类器 ==========
-    logging.info("\n=== Extracting Features for LR-RGDA ===")
-    all_features = []
-    all_labels = []
-    feat_label_offset = 0
+        (id_zs_accs, id_rgda_accs, id_ens_accs,
+         id_zs_avg, id_rgda_avg, id_ens_avg,
+         id_dataset_offset, num_id_classes,
+         zeroshot_classifier, lr_rgda_classifier) = run_full_evaluation(model, tag="No-tune")
 
-    for d_name in args.id_datasets:
-        train_transform, _ = get_transforms(d_name)
-        tr_loader, _, _, c_names = get_xtail_trainloader(
-            root=args.root, dataset_name=d_name,
-            transform_train=train_transform, transform_test=None,
-            num_shots=args.num_shots, batch_size=args.batch_size
-        )
-        from src.utils.feature_extractor import extract_features
-        features, labels = extract_features(model, tr_loader, args.device)
-        features = features / features.norm(dim=-1, keepdim=True)
-        all_features.append(features)
-        all_labels.append(labels + feat_label_offset)
-        feat_label_offset += len(c_names)
-
-    all_features = torch.cat(all_features)
-    all_labels = torch.cat(all_labels)
-
-    stats_dict = build_stats_dict_from_features(all_features, all_labels)
-
-    lr_rgda_classifier = LRRGDAClassifier(
-        stats_dict=stats_dict, device=args.device,
-        rank=args.rgda_rank,
-        qda_reg_alpha1=args.rgda_alpha1,
-        qda_reg_alpha2=args.rgda_alpha2,
-        qda_reg_alpha3=args.rgda_alpha3,
-        temperature=1.0
-    )
-
-    num_id_classes = len(all_class_names)
-    zeroshot_classifier = get_zeroshot_classifier(model, processor,
-                                                  all_class_names, args.device)
-
-    # ========== 4. 评估 ID 数据集 ==========
-    logging.info("\n=== Evaluating ID Datasets ===")
-    id_zs_accs = []
-    id_rgda_accs = []
-    id_ens_accs = []
-
-    # 预先构建数据集 -> 标签偏移的映射表
-    id_dataset_offset = {}
-    id_dataset_nclasses = {}
-    eval_offset = 0
-    for d_name in args.id_datasets:
-        _, _, _, c_names = get_xtail_trainloader(
-            root=args.root, dataset_name=d_name,
-            transform_train=None, transform_test=None,
-            num_shots=args.num_shots, batch_size=args.batch_size
-        )
-        id_dataset_offset[d_name] = eval_offset
-        id_dataset_nclasses[d_name] = len(c_names)
-        eval_offset += len(c_names)
-
-    eval_offset = 0
-    for d_name in args.id_datasets:
-        zs_acc, rgda_acc, ens_acc, c_len, _ = evaluate_dataset(
-            args, d_name, model, zeroshot_classifier, lr_rgda_classifier,
-            num_id_classes, eval_offset
-        )
-        id_zs_accs.append(zs_acc)
-        id_rgda_accs.append(rgda_acc)
-        id_ens_accs.append(ens_acc)
-        eval_offset += c_len
-        logging.info(f"[ID] {d_name:<12s} | ZS: {zs_acc:5.1f}% | "
-                     f"RGDA: {rgda_acc:5.1f}% | Ensemble: {ens_acc:5.1f}%")
-
-    # ========== 5. 评估 OOD 数据集 ==========
+    # ========== 4. 评估 OOD 数据集 ==========
     logging.info("\n=== Evaluating OOD Datasets (Ensemble with alpha=%.1f) ===" % args.alpha)
     ood_zs_accs = []
     ood_rgda_accs = []
