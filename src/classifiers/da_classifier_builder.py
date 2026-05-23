@@ -72,6 +72,7 @@ class LRRGDAClassifierBuilder(BaseClassifierBuilder):
         qda_reg_alpha3=0.5,
         temperature=1.0,
         device="cuda",
+        center_means=None,
     ):
         self.rank = rank
         self.qda_reg_alpha1 = qda_reg_alpha1
@@ -79,6 +80,7 @@ class LRRGDAClassifierBuilder(BaseClassifierBuilder):
         self.qda_reg_alpha3 = qda_reg_alpha3
         self.temperature = temperature
         self.device = device
+        self.center_means = center_means
 
     def build(self, stats_dict):
         start_time = time.time()
@@ -94,6 +96,8 @@ class LRRGDAClassifierBuilder(BaseClassifierBuilder):
             qda_reg_alpha2=self.qda_reg_alpha2,
             qda_reg_alpha3=self.qda_reg_alpha3,
             temperature=self.temperature,
+            device=self.device,
+            center_means=self.center_means,
         ).to(self.device)
         
         end_time = time.time()

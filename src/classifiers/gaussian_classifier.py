@@ -277,16 +277,26 @@ class LRRGDA(nn.Module):
         qda_reg_alpha3: float = 0.5,
         temperature: float = 1.0,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
-        batch_size: int = 20
+        batch_size: int = 20,
+        center_means: Optional[Dict[int, torch.Tensor]] = None,
     ):
         super().__init__()
         target_device = torch.device(device)
-        
+
         self.class_ids = sorted(stats_dict.keys())
         self.num_classes = len(self.class_ids)
         self.rank = rank
         self.temperature = temperature
-        
+        self.num_centers = 1  # 默认单中心
+
+        # 检查是否使用多中心
+        use_multi_center = center_means is not None
+        if use_multi_center:
+            sample_centers = center_means[self.class_ids[0]]
+            M = sample_centers.shape[0]
+            self.num_centers = M
+            logging.info(f"[Multi-Center] M={M}, total pseudo-classes={self.num_classes * M}")
+
         # 注册用于校验的 buffer
         sample_stats = stats_dict[self.class_ids[0]]
         D = sample_stats.mean.shape[0]
@@ -296,29 +306,25 @@ class LRRGDA(nn.Module):
         # 使用 no_grad 块，这是优化 LowRank 初始化内存的关键
         with torch.no_grad():
             logging.info(f"[Init] Starting batched LRRGDA on {device}. D={D}, Rank={rank}")
-            
+
             # === 1. 计算全局协方差 (Basis Matrix A) ===
             global_cov = torch.zeros((D, D), device=target_device)
-            means_list = []
-            
+
             # 分批读取
             all_cids = self.class_ids
             for i in range(0, self.num_classes, batch_size):
                 batch_cids = all_cids[i:i + batch_size]
                 for cid in batch_cids:
                     s = stats_dict[cid]
-                    means_list.append(s.mean.to(target_device).float())
                     global_cov.add_(s.cov.to(target_device).float())
-            
+
             global_cov.div_(self.num_classes)
-            means = torch.stack(means_list) # [C, D]
-            
+
             # === 2. 计算基矩阵 A 的逆 ===
             # A = α2 * Σ_global + α3 * I
             A = qda_reg_alpha2 * global_cov
             A.diagonal().add_(qda_reg_alpha3)
-            
-            # 使用 cholesky_ex 增加鲁棒性
+
             L_A, info = torch.linalg.cholesky_ex(A)
             if info.item() == 0:
                 A_inv = torch.cholesky_inverse(L_A)
@@ -329,13 +335,11 @@ class LRRGDA(nn.Module):
                 base_logdet = torch.logdet(A)
 
             # === 3. 计算低秩部分 U 和 Woodbury 修正项 ===
-            # 我们需要流式构建 parameter tensors，最后再注册 buffer
-            w_c_list = []
-            b_c_list = []
+            # 缓存列表
+            cls_bias_list = []  # 类共享偏置 [-0.5*log|Σ| + log(π)]
             U_eff_T_B_inv_list = []
-            U_eff_T_B_inv_mu_list = []
             M_inv_list = []
-            
+
             # 准备先验
             if class_priors is None:
                 log_priors = torch.full((self.num_classes,), -math.log(self.num_classes), device=target_device)
@@ -343,138 +347,232 @@ class LRRGDA(nn.Module):
                 priors_list = [class_priors[cid] for cid in self.class_ids]
                 log_priors = torch.tensor(priors_list, device=target_device).log()
 
-            # 开始批次处理 (SVD + Woodbury)
-            for i in range(0, self.num_classes, batch_size):
-                batch_indices = slice(i, i + batch_size)
-                batch_cids = self.class_ids[batch_indices]
-                current_batch_size = len(batch_cids)
-                
-                # 3.1 收集当前批次的 Cov
-                batch_covs = []
-                for cid in batch_cids:
-                    batch_covs.append(stats_dict[cid].cov.to(target_device).float())
-                batch_covs = torch.stack(batch_covs) # [B_size, D, D]
-                
-                # 3.2 低秩 SVD: Σ_c ≈ U S U^T
-                # torch.svd_lowrank 比 full svd 快且省显存
-                U_batch, S_batch, _ = torch.svd_lowrank(batch_covs, q=self.rank, niter=2)
-                S_batch = torch.clamp(S_batch, min=1e-7)
-                
-                # U_eff = U * sqrt(α1 * S)
-                scale = torch.sqrt(qda_reg_alpha1 * S_batch)
-                U_eff = U_batch * scale.unsqueeze(1) # [B_size, D, rank]
-                
-                # 3.3 Woodbury 矩阵 M = I + U^T A^{-1} U
-                # Ai_U: [B_size, D, rank]
-                Ai_U = A_inv @ U_eff 
-                # Inner: [B_size, rank, rank]
-                inner = U_eff.transpose(1, 2) @ Ai_U 
-                
-                M_batch = inner
-                M_batch.diagonal(dim1=-2, dim2=-1).add_(1.0) # +I
-                
-                # 3.4 求 M 的逆和 logdet
-                # 由于 M 只有 rank*rank 大小 (e.g. 64*64)，即使 batch 很大也很快
-                L_M, info_M = torch.linalg.cholesky_ex(M_batch)
-                
-                # 处理失败的情况 (masking)
-                is_pd = (info_M == 0)
-                M_inv_batch = torch.zeros_like(M_batch)
-                logdet_batch = torch.zeros(current_batch_size, device=target_device)
-                
-                if is_pd.all():
-                    M_inv_batch = torch.cholesky_inverse(L_M)
-                    logdet_batch = 2 * L_M.diagonal(dim1=-2, dim2=-1).log().sum(dim=-1)
-                else:
-                    # 只有部分失败或全部失败，fallback
-                    for b_idx in range(current_batch_size):
-                        if is_pd[b_idx]:
-                            M_inv_batch[b_idx] = torch.cholesky_inverse(L_M[b_idx])
-                            logdet_batch[b_idx] = 2 * L_M[b_idx].diagonal().log().sum()
-                        else:
-                            M_inv_batch[b_idx] = torch.linalg.inv(M_batch[b_idx])
-                            logdet_batch[b_idx] = torch.logdet(M_batch[b_idx])
+            if use_multi_center:
+                # ========== 多中心模式 ==========
+                w_mc_list = []    # [C, M, D]
+                b_mc_list = []    # [C, M]（仅 Mahalanobis 常数，不含 logdet/prior）
+                z_j_list = []     # [C, M, r]
+                quad_const_list = []  # [C, M]
 
-                # 3.5 预计算参数
-                # 当前批次的均值
-                batch_means = means[batch_indices] # [B_size, D]
-                
-                # w_c = A^{-1} μ_c
-                w_c_batch = batch_means @ A_inv # [B_size, D] (利用 A_inv 对称)
-                
-                # Mahalanobis constant: -0.5 * μ^T A^{-1} μ
-                maha_const = -0.5 * (batch_means * w_c_batch).sum(dim=1)
-                
-                # b_c 完整计算
-                total_logdet = base_logdet + logdet_batch
-                b_c_batch = maha_const - 0.5 * total_logdet + log_priors[batch_indices]
-                
-                # 投影矩阵 U^T A^{-1}
-                # [B_size, rank, D] = [B_size, D, rank]^T @ [D, D]
-                # -> [B_size, rank, D]
-                U_eff_T_B_inv_batch = U_eff.transpose(1, 2) @ A_inv
-                
-                # 投影均值常数
-                # [B_size, rank] = [B_size, rank, D] @ [B_size, D, 1] -> squeeze
-                U_eff_T_B_inv_mu_batch = (U_eff_T_B_inv_batch @ batch_means.unsqueeze(-1)).squeeze(-1)
+                for i in range(0, self.num_classes, batch_size):
+                    batch_indices = slice(i, i + batch_size)
+                    batch_cids = self.class_ids[batch_indices]
+                    current_batch_size = len(batch_cids)
 
-                # 收集
-                w_c_list.append(w_c_batch)
-                b_c_list.append(b_c_batch)
-                U_eff_T_B_inv_list.append(U_eff_T_B_inv_batch)
-                U_eff_T_B_inv_mu_list.append(U_eff_T_B_inv_mu_batch)
-                M_inv_list.append(M_inv_batch)
-                
-                # 主动清理显存
-                del U_batch, S_batch, U_eff, Ai_U, inner, M_batch, L_M
-            
-            # === 4. 注册最终参数 ===
-            self.register_buffer("affine_weights", torch.cat(w_c_list, dim=0))      # [C, D]
-            self.register_buffer("affine_biases", torch.cat(b_c_list, dim=0))       # [C]
-            self.register_buffer("U_eff_T_B_inv", torch.cat(U_eff_T_B_inv_list, dim=0)) # [C, r, D]
-            self.register_buffer("U_eff_T_B_inv_mu", torch.cat(U_eff_T_B_inv_mu_list, dim=0)) # [C, r]
-            self.register_buffer("M_invs", torch.cat(M_inv_list, dim=0))            # [C, r, r]
+                    # 收集当前批次的 Cov
+                    batch_covs = []
+                    for cid in batch_cids:
+                        batch_covs.append(stats_dict[cid].cov.to(target_device).float())
+                    batch_covs = torch.stack(batch_covs)  # [B_size, D, D]
+
+                    # SVD (shared across centers)
+                    U_batch, S_batch, _ = torch.svd_lowrank(batch_covs, q=self.rank, niter=2)
+                    S_batch = torch.clamp(S_batch, min=1e-7)
+
+                    scale = torch.sqrt(qda_reg_alpha1 * S_batch)
+                    U_eff = U_batch * scale.unsqueeze(1)  # [B_size, D, r]
+
+                    # Woodbury M
+                    Ai_U = A_inv @ U_eff
+                    M_batch = U_eff.transpose(1, 2) @ Ai_U
+                    M_batch.diagonal(dim1=-2, dim2=-1).add_(1.0)
+
+                    L_M, info_M = torch.linalg.cholesky_ex(M_batch)
+                    is_pd = (info_M == 0)
+                    M_inv_batch = torch.zeros_like(M_batch)
+                    logdet_batch = torch.zeros(current_batch_size, device=target_device)
+
+                    if is_pd.all():
+                        M_inv_batch = torch.cholesky_inverse(L_M)
+                        logdet_batch = 2 * L_M.diagonal(dim1=-2, dim2=-1).log().sum(dim=-1)
+                    else:
+                        for b_idx in range(current_batch_size):
+                            if is_pd[b_idx]:
+                                M_inv_batch[b_idx] = torch.cholesky_inverse(L_M[b_idx])
+                                logdet_batch[b_idx] = 2 * L_M[b_idx].diagonal().log().sum()
+                            else:
+                                M_inv_batch[b_idx] = torch.linalg.inv(M_batch[b_idx])
+                                logdet_batch[b_idx] = torch.logdet(M_batch[b_idx])
+
+                    total_logdet = base_logdet + logdet_batch
+                    cls_bias = -0.5 * total_logdet + log_priors[batch_indices]  # [B_size]
+
+                    # U_eff_T_B_inv: U^T A^{-1} [B_size, r, D] → 类内共享
+                    U_eff_T_B_inv_batch = U_eff.transpose(1, 2) @ A_inv
+
+                    # 逐中心计算
+                    w_center = []
+                    b_center = []
+                    z_center = []
+                    qconst_center = []
+
+                    for b_idx, cid in enumerate(batch_cids):
+                        centers = center_means[cid].to(target_device).float()  # [M, D]
+                        M_c = centers.shape[0]
+
+                        # w_j = A^{-1} μ_j
+                        w_j = centers @ A_inv  # [M, D]
+
+                        # b_j (纯 Mahalanobis 常数，不含 logdet/prior)
+                        b_j = -0.5 * (centers * w_j).sum(dim=1)  # [M]
+
+                        # z_j = U^T A^{-1} μ_j
+                        U_inv = U_eff_T_B_inv_batch[b_idx]  # [r, D]
+                        z_j = (U_inv @ centers.T).T  # [M, r]
+
+                        # quad_const_j = 0.5 * z_j^T M^{-1} z_j
+                        M_inv_c = M_inv_batch[b_idx]  # [r, r]
+                        M_z_j = z_j @ M_inv_c  # [M, r]
+                        qconst_j = 0.5 * (z_j * M_z_j).sum(dim=1)  # [M]
+
+                        w_center.append(w_j)
+                        b_center.append(b_j)
+                        z_center.append(z_j)
+                        qconst_center.append(qconst_j)
+
+                    # 组装 batch 结果
+                    w_mc_list.append(torch.stack(w_center, dim=0))        # [B_size, M, D]
+                    b_mc_list.append(torch.stack(b_center, dim=0))        # [B_size, M]
+                    z_j_list.append(torch.stack(z_center, dim=0))         # [B_size, M, r]
+                    quad_const_list.append(torch.stack(qconst_center, dim=0))  # [B_size, M]
+                    cls_bias_list.append(cls_bias)                        # [B_size]
+                    U_eff_T_B_inv_list.append(U_eff_T_B_inv_batch)        # [B_size, r, D]
+                    M_inv_list.append(M_inv_batch)                        # [B_size, r, r]
+
+                    del U_batch, S_batch, U_eff, Ai_U, M_batch, L_M
+
+                # 注册 buffer
+                self.register_buffer("affine_weights", torch.cat(w_mc_list, dim=0))        # [C, M, D]
+                self.register_buffer("affine_biases", torch.cat(b_mc_list, dim=0))         # [C, M]
+                self.register_buffer("z_j", torch.cat(z_j_list, dim=0))                     # [C, M, r]
+                self.register_buffer("quad_consts", torch.cat(quad_const_list, dim=0))      # [C, M]
+                self.register_buffer("cls_biases", torch.cat(cls_bias_list, dim=0))         # [C]
+                self.register_buffer("U_eff_T_B_inv", torch.cat(U_eff_T_B_inv_list, dim=0)) # [C, r, D]
+                self.register_buffer("M_invs", torch.cat(M_inv_list, dim=0))                # [C, r, r]
+
+            else:
+                # ========== 单中心模式（与原逻辑一致）==========
+                w_c_list = []
+                b_c_list = []
+                U_eff_T_B_inv_list = []
+                U_eff_T_B_inv_mu_list = []
+                M_inv_list = []
+
+                for i in range(0, self.num_classes, batch_size):
+                    batch_indices = slice(i, i + batch_size)
+                    batch_cids = self.class_ids[batch_indices]
+                    current_batch_size = len(batch_cids)
+
+                    batch_covs = []
+                    for cid in batch_cids:
+                        batch_covs.append(stats_dict[cid].cov.to(target_device).float())
+                    batch_covs = torch.stack(batch_covs)
+
+                    U_batch, S_batch, _ = torch.svd_lowrank(batch_covs, q=self.rank, niter=2)
+                    S_batch = torch.clamp(S_batch, min=1e-7)
+
+                    scale = torch.sqrt(qda_reg_alpha1 * S_batch)
+                    U_eff = U_batch * scale.unsqueeze(1)
+
+                    Ai_U = A_inv @ U_eff
+                    M_batch = U_eff.transpose(1, 2) @ Ai_U
+                    M_batch.diagonal(dim1=-2, dim2=-1).add_(1.0)
+
+                    L_M, info_M = torch.linalg.cholesky_ex(M_batch)
+                    is_pd = (info_M == 0)
+                    M_inv_batch = torch.zeros_like(M_batch)
+                    logdet_batch = torch.zeros(current_batch_size, device=target_device)
+
+                    if is_pd.all():
+                        M_inv_batch = torch.cholesky_inverse(L_M)
+                        logdet_batch = 2 * L_M.diagonal(dim1=-2, dim2=-1).log().sum(dim=-1)
+                    else:
+                        for b_idx in range(current_batch_size):
+                            if is_pd[b_idx]:
+                                M_inv_batch[b_idx] = torch.cholesky_inverse(L_M[b_idx])
+                                logdet_batch[b_idx] = 2 * L_M[b_idx].diagonal().log().sum()
+                            else:
+                                M_inv_batch[b_idx] = torch.linalg.inv(M_batch[b_idx])
+                                logdet_batch[b_idx] = torch.logdet(M_batch[b_idx])
+
+                    batch_means = stats_dict[batch_cids[0]].mean.new_zeros(current_batch_size, D)
+                    for b_idx, cid in enumerate(batch_cids):
+                        batch_means[b_idx] = stats_dict[cid].mean.to(target_device).float()
+
+                    w_c_batch = batch_means @ A_inv
+                    maha_const = -0.5 * (batch_means * w_c_batch).sum(dim=1)
+                    total_logdet = base_logdet + logdet_batch
+                    b_c_batch = maha_const - 0.5 * total_logdet + log_priors[batch_indices]
+
+                    U_eff_T_B_inv_batch = U_eff.transpose(1, 2) @ A_inv
+                    U_eff_T_B_inv_mu_batch = (U_eff_T_B_inv_batch @ batch_means.unsqueeze(-1)).squeeze(-1)
+
+                    w_c_list.append(w_c_batch)
+                    b_c_list.append(b_c_batch)
+                    U_eff_T_B_inv_list.append(U_eff_T_B_inv_batch)
+                    U_eff_T_B_inv_mu_list.append(U_eff_T_B_inv_mu_batch)
+                    M_inv_list.append(M_inv_batch)
+
+                    del U_batch, S_batch, U_eff, Ai_U, M_batch, L_M
+
+                self.register_buffer("affine_weights", torch.cat(w_c_list, dim=0))          # [C, D]
+                self.register_buffer("affine_biases", torch.cat(b_c_list, dim=0))           # [C]
+                self.register_buffer("U_eff_T_B_inv", torch.cat(U_eff_T_B_inv_list, dim=0)) # [C, r, D]
+                self.register_buffer("U_eff_T_B_inv_mu", torch.cat(U_eff_T_B_inv_mu_list, dim=0)) # [C, r]
+                self.register_buffer("M_invs", torch.cat(M_inv_list, dim=0))                # [C, r, r]
 
         # 清理
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-            
+
     @property
     def device(self) -> torch.device:
         return self.affine_weights.device
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # 1. 仿射部分: L_c(x) = x @ w_c^T + b_c
-        # affine_weights 是 [C, D]，Linear 期望 weight 是 [Out, In]，即 [C, D]
-        # F.linear(input, weight, bias) -> input @ weight.T + bias
-        affine_logits = F.linear(x, self.affine_weights, self.affine_biases)
+        if self.num_centers == 1:
+            # ========== 单中心 ==========
+            affine_logits = F.linear(x, self.affine_weights, self.affine_biases)
+            U_term = torch.einsum('crd,bd->bcr', self.U_eff_T_B_inv, x)
+            u_c = U_term - self.U_eff_T_B_inv_mu.unsqueeze(0)
+            M_u = torch.einsum('bcr,crk->bck', u_c, self.M_invs)
+            quadratic = 0.5 * (u_c * M_u).sum(dim=-1)
+            return affine_logits + quadratic
 
-        # 2. 二次修正部分: Q_c(x) = 0.5 * u_c^T M_c^{-1} u_c
-        # u_c = (U^T A^{-1} x) - (U^T A^{-1} μ)
-        
-        # [B, D] @ [C, r, D]^T -> [B, D] @ [C, D, r] -> 维度不对，需要 einsum 或调整
-        # U_eff_T_B_inv: [C, r, D]
-        # x: [B, D]
-        # x @ U_eff_T_B_inv.T -> [B, C, r]
-        
-        # 优化 einsum: 'crd,bd->bcr'
-        U_term = torch.einsum('crd,bd->bcr', self.U_eff_T_B_inv, x)
-        u_c = U_term - self.U_eff_T_B_inv_mu.unsqueeze(0) # [B, C, r]
-        
-        # 计算 u_c^T M^{-1} u_c
-        # M_invs: [C, r, r]
-        # temp = M^{-1} u_c : [C, r, r] @ [B, C, r, 1] -> [B, C, r]
-        # 但 batch matmul 需要对齐:
-        # u_c.unsqueeze(2): [B, C, 1, r]
-        # M_invs: [C, r, r] -> 广播成 [B, C, r, r] 太大
-        
-        # 使用 einsum 高效计算: u_c [B, C, r], M [C, r, k] -> [B, C, k]
-        M_u = torch.einsum('bcr,crk->bck', u_c, self.M_invs)
-        
-        # 点积求和
-        quadratic = 0.5 * (u_c * M_u).sum(dim=-1) # [B, C]
-        
-        return affine_logits + quadratic
+        else:
+            # ========== 多中心: log-sum-exp over M centers ==========
+            B, C, M = x.shape[0], self.num_classes, self.num_centers
+
+            # 1. 仿射部分 [B, C, M]
+            # affine_weights: [C, M, D], affine_biases: [C, M]
+            # x: [B, D] → x @ w^T: [B, D] @ [C*M, D]^T = [B, C*M]
+            w_flat = self.affine_weights.reshape(-1, self.affine_weights.shape[-1])  # [C*M, D]
+            b_flat = self.affine_biases.reshape(-1)  # [C*M]
+            affine_flat = F.linear(x, w_flat, b_flat)  # [B, C*M]
+            affine = affine_flat.reshape(B, C, M)  # [B, C, M]
+
+            # 2. 二次部分: 利用共享分解 quad_j = quad_base - cross_j + quad_const_j
+            # z = U^T A^{-1} x [B, C, r] — 类内共享
+            z = torch.einsum('crd,bd->bcr', self.U_eff_T_B_inv, x)
+            M_inv_z = torch.einsum('bcr,crk->bck', z, self.M_invs)  # [B, C, r]
+            quad_base = 0.5 * (z * M_inv_z).sum(dim=-1)  # [B, C]
+
+            # cross_j = z^T M^{-1} z_j = (M_inv_z)^T z_j  [B, C, M]
+            cross = torch.einsum('bcr,cmr->bcm', M_inv_z, self.z_j)  # [B, C, M]
+
+            # quad per center: [B, C, M]
+            quad = quad_base.unsqueeze(-1) - cross + self.quad_consts.unsqueeze(0)
+
+            # 3. 合并并 + 类共享偏置
+            logits = affine + quad  # [B, C, M]
+
+            # 4. log-sum-exp over M
+            m = logits.max(dim=-1, keepdim=True).values
+            per_center_exp = torch.exp(logits - m)
+            logsum = m.squeeze(-1) + torch.log(per_center_exp.sum(dim=-1))  # [B, C]
+
+            # 5. 加上类共享偏置（logdet + prior）
+            return logsum + self.cls_biases.unsqueeze(0)
 
     def predict(self, x: torch.Tensor):
         return torch.argmax(self.forward(x), dim=1)

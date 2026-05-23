@@ -1,6 +1,109 @@
+from __future__ import annotations
+
 import torch
-from typing import Dict
+from typing import Dict, Optional
 from tqdm import tqdm
+
+
+def kmeans(x: torch.Tensor, M: int, n_iter: int = 20, seed: int = 42) -> torch.Tensor:
+    """
+    类内 k-means 聚类，返回 M 个中心。
+
+    Args:
+        x: [N, D]，一个类的所有特征
+        M: 中心数
+        n_iter: 最大迭代次数
+        seed: 随机种子
+
+    Returns:
+        centers: [M, D]
+    """
+    if M >= x.size(0):
+        # M >= 样本数时，每个样本自身作为一个中心
+        return x
+
+    torch.manual_seed(seed)
+    N, D = x.shape
+    # 随机选择初始中心
+    idx = torch.randperm(N)[:M]
+    centers = x[idx].clone()
+
+    for _ in range(n_iter):
+        # 分配：计算每个点到所有中心的距离
+        dists = torch.cdist(x, centers)  # [N, M]
+        labels = dists.argmin(dim=1)  # [N]
+
+        # 更新中心
+        new_centers = torch.zeros_like(centers)
+        for j in range(M):
+            mask = labels == j
+            if mask.sum() > 0:
+                new_centers[j] = x[mask].mean(dim=0)
+            else:
+                # 空簇：保留原中心
+                new_centers[j] = centers[j]
+
+        if torch.allclose(centers, new_centers, atol=1e-6):
+            break
+        centers = new_centers
+
+    return centers
+
+
+def build_multi_center_stats_dict(
+    features: torch.Tensor,
+    labels: torch.Tensor,
+    M: int = 1,
+    kmeans_seed: int = 42
+) -> Dict[int, GaussianStatistics]:
+    """
+    从特征和标签构建单中心或多中心统计分布。
+
+    M=1: 返回标准 Dict[class_id, GaussianStatistics(mean, cov)]
+    M>1: 每个类通过 k-means 得到 M 个中心，共享类协方差。
+         返回的 GaussianStatistics.mean 存储展平后的中心拼接 [M*D]，
+         需配合 center_means 字典使用。
+
+    Args:
+        features: [N, D]
+        labels: [N]
+        M: 每类的中心数（1=单中心）
+        kmeans_seed: k-means 随机种子
+
+    Returns:
+        stats_dict: Dict[class_id, GaussianStatistics]
+        center_means: Dict[class_id, Tensor[M, D]]（仅 M>1 时）
+    """
+    unique_classes = torch.unique(labels)
+    stats_dict = {}
+    center_dict = {}
+
+    for c in unique_classes:
+        idx = (labels == c)
+        data_c = features[idx]
+
+        # 协方差（始终共享）
+        if data_c.shape[0] > 1:
+            cov = torch.cov(data_c.T)
+        else:
+            cov = torch.eye(data_c.shape[1], device=data_c.device)
+
+        if M == 1:
+            # 单中心：标准均值
+            mu = torch.mean(data_c, dim=0)
+            stats_dict[int(c)] = GaussianStatistics(mu, cov)
+        else:
+            # 多中心：k-means
+            centers = kmeans(data_c, M, seed=kmeans_seed)
+            # 主均值（兼容旧接口，取第一个中心）
+            mu = centers[0]
+            stats_dict[int(c)] = GaussianStatistics(mu, cov)
+            center_dict[int(c)] = centers
+
+    if M > 1:
+        return stats_dict, center_dict
+    return stats_dict, None
+
 
 def cholesky_stable(matrix: torch.Tensor, reg: float = 1e-5) -> torch.Tensor:
     if matrix.dim() == 3:

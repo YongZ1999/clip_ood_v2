@@ -188,10 +188,14 @@ def main(args):
                               aux_weight=args.aux_weight)
 
         # --- 2c. 零空间投影 (NSP) 抗遗忘 ---
-        print("\n=== Applying Null-Space Projection (NSP) ===")
-        covariances = trainer.extract_layer_covariances(cov_loader)
-        trainer.update_covariance_history(covariances)
-        trainer.finalize_task_for_incremental()
+        if args.lora_type in ["lora_nsp", "lora_sgp"]:
+            print("\n=== Applying Null-Space Projection (NSP) ===")
+            covariances = trainer.extract_layer_covariances(cov_loader)
+            trainer.update_covariance_history(covariances)
+            trainer.finalize_task_for_incremental()
+        else:
+            print(f"\n=== Merging LoRA Weights (lora_type={args.lora_type}) ===")
+            trainer.finalize_task_for_incremental()
 
         # --- 2d. 提取特征并构建统计字典 ---
         task_features = []

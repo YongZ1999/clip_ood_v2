@@ -1,18 +1,21 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict
+from typing import Dict, Optional
 from .da_classifier_builder import LRRGDAClassifierBuilder
 from .gaussian_statistics import GaussianStatistics
 
 
 class LRRGDAClassifier:
     """
-    LR-RGDA分类器（基于类别统计分布构建）
-    
+    LR-RGDA分类器（基于类别统计分布构建，支持单中心/多中心）
+
     该类完全基于各类别的高斯统计分布（均值和协方差）构建，
     无需原始数据或特征向量，适用于增量学习场景。
-    
+
+    当 M > 1 时，每类通过 k-means 得到 M 个中心共享协方差，
+    通过 log-sum-exp 归约为类概率。
+
     Usage:
         # 1. 准备类别统计分布
         stats_dict = {
@@ -20,23 +23,29 @@ class LRRGDAClassifier:
             1: GaussianStatistics(mean_1, cov_1),
             ...
         }
-        
-        # 2. 构建分类器
+
+        # 2. 构建分类器（单中心）
         classifier = LRRGDAClassifier(stats_dict, device='cuda')
-        
-        # 3. 预测
+
+        # 3. 构建分类器（多中心）
+        classifier = LRRGDAClassifier(stats_dict, device='cuda', M=16,
+                                       center_means=center_means)
+
+        # 4. 预测
         predictions = classifier.predict(features)
     """
-    
+
     def __init__(
         self, 
         stats_dict: Dict[int, GaussianStatistics], 
         device: str = 'cuda',
-        rank: int = 32,  # 优化后的默认值
+        rank: int = 32,
         qda_reg_alpha1: float = 0.2,
         qda_reg_alpha2: float = 2.0,
         qda_reg_alpha3: float = 0.5,
-        temperature: float = 1.0
+        temperature: float = 1.0,
+        M: int = 1,
+        center_means: Optional[Dict[int, torch.Tensor]] = None,
     ):
         """
         Args:
@@ -47,10 +56,13 @@ class LRRGDAClassifier:
             qda_reg_alpha2: 全局协方差权重
             qda_reg_alpha3: 单位矩阵正则化权重
             temperature: 温度参数（用于概率输出的softmax）
+            M: 每类中心数（1=单中心）
+            center_means: Dict[class_id, Tensor[M, D]]，M>1 时必填
         """
         self.device = device
         self.stats_dict = stats_dict
-        
+        self.M = M
+
         # 构建LR-RGDA分类器
         builder = LRRGDAClassifierBuilder(
             rank=rank,
@@ -58,9 +70,10 @@ class LRRGDAClassifier:
             qda_reg_alpha2=qda_reg_alpha2,
             qda_reg_alpha3=qda_reg_alpha3,
             temperature=temperature,
-            device=device
+            device=device,
+            center_means=center_means,
         )
-        
+
         self.classifier = builder.build(stats_dict)
         self.num_classes = len(stats_dict)
     
