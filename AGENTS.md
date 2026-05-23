@@ -15,7 +15,9 @@
 
 ### 保存格式
 
-文件命名：`chat-history/{YYYY-MM-DD}-{topic}.md`
+文件命名：`chat-history/{YYYY-MM-DD}-{seq}-{topic}.md`
+
+> **seq** 为两位序号，同一天的多条记录按时间递增。
 
 ```
 chat-history/
