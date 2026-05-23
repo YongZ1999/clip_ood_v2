@@ -308,26 +308,27 @@ def main(args):
     ood_rgda_accs = []
     ood_ens_accs = []
 
-    # OOD 数据集的标签偏移：若该数据集同时也是 ID 数据集，使用其在 ID 中的已知偏移；
-    # 若是真正 novel 的数据集，使用当前累积的总偏移（新建独立的标签空间）
-    novel_offset = sum(id_dataset_nclasses.values())
     for d_name in args.ood_datasets:
         if d_name in id_dataset_offset:
+            # OOD 数据集同时也是 ID 数据集：使用现有的分类器
             ood_eval_offset = id_dataset_offset[d_name]
             c_len = id_dataset_nclasses[d_name]
+            ood_zeroshot_classifier = zeroshot_classifier
         else:
-            # 对于 novel 数据集，需要获取其类别数
-            _, _, _, c_names = get_xtail_trainloader(
+            # 对于 novel OOD 数据集：用该数据集自身的类别名构建零样本分类器
+            _, _, _, ood_c_names = get_xtail_trainloader(
                 root=args.root, dataset_name=d_name,
                 transform_train=None, transform_test=None,
                 num_shots=args.num_shots, batch_size=args.batch_size
             )
-            c_len = len(c_names)
-            ood_eval_offset = novel_offset
-            novel_offset += c_len
+            c_len = len(ood_c_names)
+            ood_eval_offset = 0
+            ood_zeroshot_classifier = get_zeroshot_classifier(
+                model, processor, ood_c_names, args.device
+            )
 
         zs_acc, rgda_acc, ens_acc, _, _ = evaluate_dataset(
-            args, d_name, model, zeroshot_classifier, lr_rgda_classifier,
+            args, d_name, model, ood_zeroshot_classifier, lr_rgda_classifier,
             num_id_classes, ood_eval_offset
         )
         ood_zs_accs.append(zs_acc)
