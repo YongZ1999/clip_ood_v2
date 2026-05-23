@@ -111,7 +111,7 @@ paper_writing/
   - 同样解决 CLIP 持续学习中的灾难性遗忘问题
   - 本论文的 LADA 评估指标（Transfer / Average / Last）沿用自 LADA 论文
   - 本论文的 X-TAIL 实验设置（10 个数据集、16-shot）与 LADA 一致
-  - 本论文的核心对比对象：在 LADA 的评估协议下，用 LoRA-NSP + 自适应路由达到更优的 ID/OOD 平衡
+  - 本论文的核心对比对象：在 LADA 的评估协议下，用 LoRA-NSP + LR-RGDA 集成分类器达到更优的 ID/OOD 平衡
 
 ### 论文创新主张
 
@@ -120,7 +120,7 @@ paper_writing/
 | 端 | 创新 | 与 LADA 的区别 |
 |----|------|---------------|
 | **训练端** | LoRA-NSP（零空间投影 + 复合蒸馏） | LADA 仅用特征蒸馏，本文增加了跨模态蒸馏；LoRA-NSP 用零空间保护预训练知识，而 LADA 依赖标签特定记忆单元 |
-| **推理端** | LR-RGDA 集成分类器 + 自适应路由 | LADA 无推理端优化，完全依赖适配器输出；本文通过 OOD 检测路由到零样本分类器，进一步保护 OOD 泛化 |
+| **推理端** | LR-RGDA 集成分类器（低秩正则化高斯判别分析 + 零样本集成） | LADA 同样有推理端融合（视觉/文本双分支加权），但 LADA 用标签记忆单元作为分类权重；本文用 LR-RGDA（基于类别统计分布的高斯建模）作为监督分类器，与零样本分类器集成 |
 
 ### 论文写作相关文件
 
@@ -213,23 +213,22 @@ git remote set-url origin https://github.com/raoxuan98-hash/project_clip_continu
 ### 研究问题
 CLIP 模型在持续学习中的灾难性遗忘。微调会破坏跨模态对齐结构 → 零样本 OOD 泛化能力下降。
 
-### 三大创新（训练端 + 推理端协同）
+### 两大创新（训练端 + 推理端协同）
 
 | # | 创新 | 核心文件 | 一句话 |
 |---|------|---------|--------|
 | 1 | **LoRA-NSP**（训练端） | `src/models/lora_sgp.py`, `src/trainers/lora_nsp_trainer.py` | LoRA 更新投影到预训练权重的零空间 + 蒸馏损失 |
 | 2 | **LR-RGDA 集成分类器**（推理端） | `src/classifiers/lr_rgda_classifier.py`, `src/classifiers/gaussian_classifier.py` | 低秩正则化高斯判别分析 + 零样本集成 |
-| 3 | **自适应路由**（推理端） | `src/routing/adaptive_router.py`, `src/detectors/ood_detector.py` | OOD 走零样本，ID 走集成，无需额外前向 |
 
 ### 实验基线（5种）
 
 | 基线 | 训练 | 分类器 | 对应配置文件 |
 |------|------|--------|-------------|
 | **B0** | 无 | 零样本 | `configs/experiments/incremental_b0_zeroshot.yaml` |
-| **B1** | 无 | 路由 + LR-RGDA | `configs/experiments/incremental_b1_routing.yaml` |
+| **B1** | 无 | LR-RGDA + 零样本集成 | `configs/experiments/incremental_b1_routing.yaml` |
 | **B2** | 标准 LoRA | 零样本 | `configs/experiments/incremental_b2_lora_zs.yaml` |
 | **B3** | LoRA-NSP | 零样本 | `configs/experiments/incremental_b3_lora_nsp_zs.yaml` |
-| **B4** | LoRA-NSP | 完整方法 | `configs/experiments/incremental_b4_lora_nsp_full.yaml` |
+| **B4** | LoRA-NSP | LR-RGDA + 零样本集成（完整方法） | `configs/experiments/incremental_b4_lora_nsp_full.yaml` |
 
 ### 数据集
 - **10 个 X-TAIL 数据集**：aircraft, caltech101, dtd, eurosat, flowers, food101, mnist, oxford_pets, stanford_cars, sun397
@@ -241,9 +240,8 @@ CLIP 模型在持续学习中的灾难性遗忘。微调会破坏跨模态对齐
 
 | 参数 | 最优值 | 说明 |
 |------|--------|------|
-| LR-RGDA α₁ / α₂ / α₃ | 0.6 / 2.0 / 0.5 | 分类器/检测器共享 |
+| LR-RGDA α₁ / α₂ / α₃ | 0.6 / 2.0 / 0.5 | 协方差正则化权重 |
 | Ensemble α | 0.8 | LR-RGDA 的融合权重 |
-| OOD 阈值 | 0.993 | 对应 95% TPR |
 | LoRA rank | 4 (训练) / 32 (LR-RGDA) | |
 | cov_momentum | 0.9 | 滑动平均 |
 | 蒸馏权重 FD / CD | 1.0 / 1.0 | |
@@ -272,8 +270,6 @@ project_clip_continual_learning/
 ├── paper_writing/                     # 论文写作（LaTeX模板、草稿、参考论文）
 ├── src/
 │   ├── classifiers/                   # LR-RGDA, LDA, QDA 分类器
-│   ├── detectors/                     # OOD 检测器
-│   ├── routing/                       # 自适应路由
 │   ├── trainers/                      # LoRA-NSP 训练器
 │   ├── models/                        # CLIP 封装, LoRA 变体, 蒸馏损失
 │   ├── experiments/                   # 实验入口脚本
@@ -293,7 +289,7 @@ project_clip_continual_learning/
 | 文件 | 功能 |
 |------|------|
 | `src/experiments/run_continual_learning.py` | 持续学习主实验（B0/B2/B3） |
-| `src/experiments/run_continual_learning_routing.py` | 带路由的持续学习（B1/B4） |
+| `src/experiments/run_continual_learning_routing.py` | 带集成分类器的持续学习（B1/B4） |
 | `src/experiments/run_continual_learning_routing_v2.py` | v2 版本 |
 | `src/experiments/generate_paper_tables.py` | 论文表格生成 |
 
@@ -398,4 +394,3 @@ ssh raoxuan@10.20.34.30 "
 - **`src/classifiers/` 中的 `lr_rgda_classifier.py` 和 `gaussian_classifier.py`**：前者是高层封装（继承自 `da_classifier_builder.py` 构建器），后者是底层 nn.Module。注意区分。
 - **`src/models/trainer.py`** 是旧版/遗留代码。新的训练逻辑在 `src/trainers/lora_nsp_trainer.py`。
 - **`AUROC` vs `AUROC`**：代码中两者混用，注意不要引入拼写不一致。
-- **OOD 检测器阈值 0.993** 是经过网格搜索优化的，仅在 `alpha1=0.6, alpha2=2.0, alpha3=0.5` 下有效。改检测器参数后需要重新优化阈值。

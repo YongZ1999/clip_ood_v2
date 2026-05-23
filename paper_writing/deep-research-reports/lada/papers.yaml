@@ -11,13 +11,13 @@ papers:
     year: 2024
     venue: "CVPR 2024"
     reading_level: "deep_read"
-  - arxiv_id: "2404.02948"
+  - arxiv_id: "2406.18868"
     title: "Advancing Cross-domain Discriminability in Continual Learning of Vision-Language Models"
     authors: "Xu et al."
     year: 2024
-    venue: "CVPR 2024"
+    venue: "NeurIPS 2024"
     reading_level: "deep_read"
-  - arxiv_id: "2303.06604"
+  - arxiv_id: "2303.06628"
     title: "Preventing Zero-Shot Transfer Degradation in Continual Learning of Vision-Language Models"
     authors: "Zheng et al."
     year: 2023
