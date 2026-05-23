@@ -98,7 +98,7 @@ def parse_args():
                         help="P parameter for weight function.")
 
     # 参考数据集参数（默认不使用蒸馏）
-    parser.add_argument("--reference_dataset", type=str, default="",
+    parser.add_argument("--reference_dataset", type=str, default="flickr8k",
                         help="Reference dataset for distillation. Set to 'flickr8k' to enable.")
     parser.add_argument("--reference_batch_size", type=int, default=32,
                         help="Batch size for reference dataset.")

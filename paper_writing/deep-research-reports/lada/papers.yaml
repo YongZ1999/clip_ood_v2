@@ -5,3 +5,21 @@ papers:
     year: 2025
     venue: "ICML 2025"
     reading_level: "deep_read"
+  - arxiv_id: "2403.11549"
+    title: "Boosting Continual Learning of Vision-Language Models via Mixture-of-Experts Adapters"
+    authors: "Jiazuo Yu, Yunzhi Zhuge, Lu Zhang, Ping Hu, Dong Wang, Huchuan Lu, You He"
+    year: 2024
+    venue: "CVPR 2024"
+    reading_level: "deep_read"
+  - arxiv_id: "2404.02948"
+    title: "Advancing Cross-domain Discriminability in Continual Learning of Vision-Language Models"
+    authors: "Xu et al."
+    year: 2024
+    venue: "CVPR 2024"
+    reading_level: "deep_read"
+  - arxiv_id: "2303.06604"
+    title: "Preventing Zero-Shot Transfer Degradation in Continual Learning of Vision-Language Models"
+    authors: "Zheng et al."
+    year: 2023
+    venue: "ICCV 2023"
+    reading_level: "deep_read"
