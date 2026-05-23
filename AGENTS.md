@@ -146,7 +146,7 @@ paper_writing/
 | 项目 | 内容 |
 |------|------|
 | 服务器地址 | `raoxuan@10.20.34.30` |
-| 远程项目路径 | `/home/raoxuan/projects/clip_ood`（对应本地的 `project_clip_continual_learning/`） |
+| 远程项目路径 | `/home/raoxuan/projects/project_clip_continual_learning` |
 | GitHub 仓库 | `https://github.com/raoxuan98-hash/clip_ood`（即将更名为 `project_clip_continual_learning`） |
 | 数据路径 | `/home/raoxuan/projects/data/X-TAIL/` |
 
@@ -158,7 +158,7 @@ paper_writing/
 1. 修改代码
 2. git add + git commit + git push
                                      3. ssh 登录
-                                     4. cd /home/raoxuan/projects/clip_ood
+                                     4. cd /home/raoxuan/projects/project_clip_continual_learning
                                      5. git pull
                                      6. 运行实验 / 执行代码
                                      7. 实验结果保存在 experiments/ 目录
