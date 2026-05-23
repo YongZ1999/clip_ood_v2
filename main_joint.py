@@ -71,9 +71,12 @@ def parse_args():
     # 训练基础参数
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed for reproducibility.")
+    # 设备参数
+    parser.add_argument("--gpu", type=int, default=0,
+                        help="GPU index to use (e.g., 0 for cuda:0). Sets CUDA_VISIBLE_DEVICES.")
     parser.add_argument("--device", type=str,
-                        default="cuda" if torch.cuda.is_available() else "cpu",
-                        help="Device to use for training.")
+                        default=None,
+                        help="Device to use for training. Overrides --gpu if set.")
     parser.add_argument("--iterations", type=int, default=800,
                         help="Number of training iterations.")
 
@@ -139,6 +142,11 @@ def parse_args():
                         help="qda_reg_alpha3 for LR-RGDA.")
 
     args = parser.parse_args()
+
+    # 解析设备：优先 --device，否则用 --gpu 设置 CUDA_VISIBLE_DEVICES
+    if args.device is None:
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
+        args.device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # 自动计算 OOD 数据集为 X-TAIL 补集
     if args.ood_datasets is None:
