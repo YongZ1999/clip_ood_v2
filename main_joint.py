@@ -84,7 +84,7 @@ def parse_args():
     # LoRA 相关参数
     parser.add_argument("--lora_rank", type=int, default=4,
                         help="Rank for LoRA adaptation.")
-    parser.add_argument("--lora_type", type=str, default="lora_vanilla",
+    parser.add_argument("--lora_type", type=str, default="lora_nsp",
                         choices=["lora_vanilla", "lora_sgp", "lora_nsp"],
                         help="Type of LoRA adaptation.")
     parser.add_argument("--nsp_eps", type=float, default=0.05,

@@ -81,7 +81,7 @@ def parse_args():
     # LoRA 相关参数
     parser.add_argument("--lora_rank", type=int, default=4,
                         help="Rank for LoRA adaptation.")
-    parser.add_argument("--lora_type", type=str, default="lora_vanilla",
+    parser.add_argument("--lora_type", type=str, default="lora_nsp",
                         choices=["lora_vanilla", "lora_sgp", "lora_nsp"],
                         help="Type of LoRA adaptation (for backward compat).")
     parser.add_argument("--init_mode", type=str, default="lora_nsp",
@@ -118,7 +118,7 @@ def parse_args():
                         help="Weight for feature distillation loss.")
     parser.add_argument("--cd_weight", type=float, default=1.0,
                         help="Weight for cross-modal distillation loss.")
-    parser.add_argument("--aux_weight", type=float, default=0.0,
+    parser.add_argument("--aux_weight", type=float, default=1.0,
                         help="Weight for auxiliary linear classifier loss (0=disabled). "
                              "Adds a linear head on features during training to improve "
                              "feature separability for downstream LR-RGDA.")
