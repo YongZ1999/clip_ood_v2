@@ -13,6 +13,7 @@ import os
 import random
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 
 def fix_random_seed(seed=42):
@@ -69,7 +70,7 @@ def evaluate_dataset(args, d_name, model, zeroshot_classifier, lr_rgda_classifie
     from src.utils.feature_extractor import extract_features
 
     _, test_transform = get_transforms(d_name)
-    _, te_loader, _, c_names = get_xtail_trainloader(
+    _, _, te_loader, c_names = get_xtail_trainloader(
         root=args.root, dataset_name=d_name,
         transform_train=None, transform_test=test_transform,
         num_shots=args.num_shots, batch_size=args.batch_size)
@@ -94,15 +95,25 @@ def evaluate_dataset(args, d_name, model, zeroshot_classifier, lr_rgda_classifie
         rgda_preds = rgda_logits_norm.argmax(dim=1)
         rgda_acc = rgda_preds.eq(labels).float().mean().item() * 100
 
-        # 3. Ensemble 预测 (1-alpha)*ZS + alpha*RGDA
-        ensemble_logits = zs_logits_norm * (1 - args.alpha)
-        ensemble_logits[:, :current_num_classes] += args.alpha * rgda_logits_norm
+        # 3. Ensemble 预测（固定 α 或自适应）
+        use_adaptive = getattr(args, 'adaptive_ensemble', False)
+        if use_adaptive:
+            zs_probs = F.softmax(zs_logits_norm, dim=-1)
+            rgda_probs = F.softmax(rgda_logits_norm, dim=-1)
+            zs_conf = zs_probs.max(dim=-1).values        # [B]
+            rgda_conf = rgda_probs.max(dim=-1).values    # [B]
+            alpha_sample = torch.sigmoid(rgda_conf - zs_conf).unsqueeze(-1)  # [B, 1]
+            ensemble_logits = (1 - alpha_sample) * zs_logits_norm
+            ensemble_logits[:, :current_num_classes] += alpha_sample * rgda_logits_norm
+        else:
+            ensemble_logits = zs_logits_norm * (1 - args.alpha)
+            ensemble_logits[:, :current_num_classes] += args.alpha * rgda_logits_norm
         ens_preds = ensemble_logits.argmax(dim=1)
         ens_acc = ens_preds.eq(labels).float().mean().item() * 100
 
-        # 4. Alpha 敏感性分析（可选）
+        # 4. Alpha 敏感性分析（可选，只在固定 α 模式下有意义）
         sensitivity_list = None
-        if alpha_sensitivity:
+        if alpha_sensitivity and not use_adaptive:
             sensitivity_list = []
             for alpha in torch.linspace(0, 1.0, n_alpha_samples):
                 ens_logits = zs_logits_norm * (1 - alpha)
@@ -153,6 +164,7 @@ def batch_evaluate_datasets(
         batch_size = args.batch_size
         device = args.device
         alpha = args.alpha
+        use_adaptive = getattr(args, 'adaptive_ensemble', False)
 
     from utils_data import get_xtail_trainloader, get_transforms
     from src.utils.feature_extractor import extract_features
@@ -164,7 +176,7 @@ def batch_evaluate_datasets(
 
     for d_name in dataset_names:
         _, test_transform = get_transforms(d_name)
-        _, te_loader, _, c_names = get_xtail_trainloader(
+        _, _, te_loader, c_names = get_xtail_trainloader(
             root=root, dataset_name=d_name,
             transform_train=None, transform_test=test_transform,
             num_shots=num_shots, batch_size=batch_size
@@ -192,15 +204,24 @@ def batch_evaluate_datasets(
         rgda_preds = rgda_logits_norm.argmax(dim=1)
         rgda_overall = rgda_preds.eq(all_labels).float().mean().item() * 100
 
-        # 3. Ensemble
-        ensemble_logits = zs_logits_norm * (1 - alpha)
-        ensemble_logits[:, :num_id_classes] += alpha * rgda_logits_norm
+        # 3. Ensemble（固定 α 或自适应）
+        if use_adaptive:
+            zs_probs = F.softmax(zs_logits_norm, dim=-1)
+            rgda_probs = F.softmax(rgda_logits_norm, dim=-1)
+            zs_conf = zs_probs.max(dim=-1).values
+            rgda_conf = rgda_probs.max(dim=-1).values
+            alpha_sample = torch.sigmoid(rgda_conf - zs_conf).unsqueeze(-1)
+            ensemble_logits = (1 - alpha_sample) * zs_logits_norm
+            ensemble_logits[:, :num_id_classes] += alpha_sample * rgda_logits_norm
+        else:
+            ensemble_logits = zs_logits_norm * (1 - alpha)
+            ensemble_logits[:, :num_id_classes] += alpha * rgda_logits_norm
         ens_preds = ensemble_logits.argmax(dim=1)
         ens_overall = ens_preds.eq(all_labels).float().mean().item() * 100
 
-        # 4. Alpha 敏感性分析（在合并特征上统一扫描）
+        # 4. Alpha 敏感性分析（在合并特征上统一扫描，只在固定 α 模式下有意义）
         sensitivity = None
-        if alpha_sensitivity:
+        if alpha_sensitivity and not use_adaptive:
             sensitivity = []
             for a in torch.linspace(0, 1.0, n_alpha_samples):
                 ens_logits = zs_logits_norm * (1 - a)
@@ -242,20 +263,20 @@ def get_full_stats(matrix):
         }
     else:
         K = num_rows
-        # Transfer_k = mean of accuracy on task k before it was trained
-        # For k=0 (first task): no Transfer defined
+        # Transfer_k = mean of accuracy on old tasks (j<k) after learning task k
+        # = mean of row k, columns j<k → matrix[k][j]
         trans = []
         for k in range(K):
             if k == 0:
                 trans.append(0.0)  # placeholder for display
             else:
-                trans.append(sum(matrix[j][k] for j in range(k)) / k)
+                trans.append(sum(matrix[k][j] for j in range(k)) / k)
         # Transfer = mean of Transfer_k for k=2..K (K-1 values)
         transfer_values = [trans[k] for k in range(1, K)]
         transfer_total_avg = sum(transfer_values) / len(transfer_values)
 
-        # Average_k = mean across ALL training steps for task k
-        avgs = [sum(matrix[j][k] for j in range(K)) / K for k in range(K)]
+        # Average_k = mean of column k across rows k..K-1 (only after task k is learned)
+        avgs = [sum(matrix[j][k] for j in range(k, K)) / (K - k) for k in range(K)]
         average_total_avg = sum(avgs) / K
 
         # Last_k = accuracy on task k after all K tasks trained

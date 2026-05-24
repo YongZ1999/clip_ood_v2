@@ -21,7 +21,7 @@ import argparse
 import json
 import logging
 from datetime import datetime
-from torch.utils.data import DataLoader, ConcatDataset
+from torch.utils.data import DataLoader, ConcatDataset, WeightedRandomSampler
 
 from src.trainers.lora_nsp_trainer import LoRANSPTrainer
 from src.classifiers.lr_rgda_classifier import LRRGDAClassifier
@@ -114,6 +114,10 @@ def parse_args():
                         help="Weight for auxiliary linear classifier loss (0=disabled). "
                              "Adds a linear head on features during training to improve "
                              "feature separability for downstream LR-RGDA.")
+    parser.add_argument("--sce_a", type=float, default=0.5,
+                        help="Weight for CE in symmetric cross-entropy loss.")
+    parser.add_argument("--sce_b", type=float, default=0.5,
+                        help="Weight for RCE in symmetric cross-entropy loss.")
 
     # 模型微调开关
     parser.add_argument("--tune_student", type=lambda x: x.lower() == 'true', default=True,
@@ -124,6 +128,8 @@ def parse_args():
     parser.add_argument("--alpha_sensitivity", action='store_true', default=False,
                         help="If set, evaluate ensemble accuracy at multiple alpha values "
                              "(0 to 1.0) to analyze sensitivity.")
+    parser.add_argument("--adaptive_ensemble", action='store_true', default=False,
+                        help="Use per-sample adaptive alpha based on classifier confidence.")
 
     # 分类器参数
     parser.add_argument("--alpha", type=float, default=0.5,
@@ -203,6 +209,24 @@ def main(args):
             all_features, all_labels, M=args.num_centers
         )
 
+        # 计算数据集等权的全局协方差（避免类别多的数据集主导 Σ_global）
+        feat_offset = 0
+        per_dataset_covs = []
+        for d_name in args.id_datasets:
+            _, _, _, c_names = get_xtail_trainloader(
+                root=args.root, dataset_name=d_name,
+                transform_train=None, transform_test=None,
+                num_shots=args.num_shots, batch_size=args.batch_size
+            )
+            n_classes = len(c_names)
+            ds_cov = sum(stats_dict[cid].cov for cid in range(feat_offset, feat_offset + n_classes)) / n_classes
+            per_dataset_covs.append(ds_cov)
+            feat_offset += n_classes
+
+        dataset_balanced_global_cov = sum(per_dataset_covs) / len(per_dataset_covs)
+        logging.info(f"[Balanced Global Cov] Computed from {len(per_dataset_covs)} datasets, "
+                     f"each with equal weight ({per_dataset_covs[0].shape})")
+
         lr_rgda_classifier = LRRGDAClassifier(
             stats_dict=stats_dict, device=args.device,
             rank=args.rgda_rank,
@@ -211,6 +235,7 @@ def main(args):
             qda_reg_alpha3=args.rgda_alpha3,
             temperature=1.0,
             M=args.num_centers, center_means=center_means,
+            global_cov=dataset_balanced_global_cov,
         )
 
         num_id_classes = len(all_class_names)
@@ -295,7 +320,16 @@ def main(args):
             current_offset += len(c_names)
 
         merged_dataset = ConcatDataset(all_shifted_datasets)
-        merged_loader = DataLoader(merged_dataset, batch_size=args.batch_size, shuffle=True, num_workers=6)
+
+        # 均衡采样：每个数据集在每个 batch 中等比例出现
+        num_datasets = len(all_shifted_datasets)
+        weights = []
+        for ds in all_shifted_datasets:
+            n = len(ds)
+            weights.extend([1.0 / (n * num_datasets)] * n)
+        sampler = WeightedRandomSampler(weights, num_samples=len(merged_dataset), replacement=True)
+        merged_loader = DataLoader(merged_dataset, batch_size=args.batch_size,
+                                   sampler=sampler, num_workers=6)
 
         # 2b. 训练模型
         logging.info("\n=== Training (Joint Fine-tuning) ===")

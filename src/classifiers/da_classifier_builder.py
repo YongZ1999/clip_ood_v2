@@ -73,6 +73,7 @@ class LRRGDAClassifierBuilder(BaseClassifierBuilder):
         temperature=1.0,
         device="cuda",
         center_means=None,
+        global_cov=None,
     ):
         self.rank = rank
         self.qda_reg_alpha1 = qda_reg_alpha1
@@ -81,12 +82,13 @@ class LRRGDAClassifierBuilder(BaseClassifierBuilder):
         self.temperature = temperature
         self.device = device
         self.center_means = center_means
+        self.global_cov = global_cov
 
     def build(self, stats_dict):
         start_time = time.time()
-        
+
         priors = {cid: 1.0 / len(stats_dict) for cid in stats_dict}
-        
+
         # Directly instantiate LRRGDA
         model = LRRGDA(
             stats_dict=stats_dict,
@@ -98,6 +100,7 @@ class LRRGDAClassifierBuilder(BaseClassifierBuilder):
             temperature=self.temperature,
             device=self.device,
             center_means=self.center_means,
+            global_cov=self.global_cov,
         ).to(self.device)
         
         end_time = time.time()

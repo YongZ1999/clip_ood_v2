@@ -279,6 +279,7 @@ class LRRGDA(nn.Module):
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
         batch_size: int = 20,
         center_means: Optional[Dict[int, torch.Tensor]] = None,
+        global_cov: Optional[torch.Tensor] = None,
     ):
         super().__init__()
         target_device = torch.device(device)
@@ -308,17 +309,22 @@ class LRRGDA(nn.Module):
             logging.info(f"[Init] Starting batched LRRGDA on {device}. D={D}, Rank={rank}")
 
             # === 1. 计算全局协方差 (Basis Matrix A) ===
-            global_cov = torch.zeros((D, D), device=target_device)
+            if global_cov is not None:
+                # 使用外部传入的全局协方差（数据集等权平均）
+                global_cov = global_cov.to(target_device).float()
+                logging.info("[Init] Using externally provided global_cov (dataset-balanced).")
+            else:
+                # 默认：对所有类别等权平均
+                global_cov = torch.zeros((D, D), device=target_device)
 
-            # 分批读取
-            all_cids = self.class_ids
-            for i in range(0, self.num_classes, batch_size):
-                batch_cids = all_cids[i:i + batch_size]
-                for cid in batch_cids:
-                    s = stats_dict[cid]
-                    global_cov.add_(s.cov.to(target_device).float())
+                all_cids = self.class_ids
+                for i in range(0, self.num_classes, batch_size):
+                    batch_cids = all_cids[i:i + batch_size]
+                    for cid in batch_cids:
+                        s = stats_dict[cid]
+                        global_cov.add_(s.cov.to(target_device).float())
 
-            global_cov.div_(self.num_classes)
+                global_cov.div_(self.num_classes)
 
             # === 2. 计算基矩阵 A 的逆 ===
             # A = α2 * Σ_global + α3 * I
@@ -495,7 +501,7 @@ class LRRGDA(nn.Module):
                                 M_inv_batch[b_idx] = torch.linalg.inv(M_batch[b_idx])
                                 logdet_batch[b_idx] = torch.logdet(M_batch[b_idx])
 
-                    batch_means = stats_dict[batch_cids[0]].mean.new_zeros(current_batch_size, D)
+                    batch_means = torch.zeros(current_batch_size, D, device=target_device)
                     for b_idx, cid in enumerate(batch_cids):
                         batch_means[b_idx] = stats_dict[cid].mean.to(target_device).float()
 

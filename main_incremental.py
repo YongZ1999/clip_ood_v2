@@ -83,7 +83,18 @@ def parse_args():
                         help="Rank for LoRA adaptation.")
     parser.add_argument("--lora_type", type=str, default="lora_vanilla",
                         choices=["lora_vanilla", "lora_sgp", "lora_nsp"],
-                        help="Type of LoRA adaptation.")
+                        help="Type of LoRA adaptation (for backward compat).")
+    parser.add_argument("--init_mode", type=str, default="lora_nsp",
+                        choices=["lora_nsp", "lora_vanilla",
+                                 "proj_sigma_tail", "proj_sigma_middle",
+                                 "weight_svd_tail", "weight_svd_middle"],
+                        help="""Adapter initialization mode.
+    lora_nsp:        (default) runtime P + random A/B init (current LoRA-NSP)
+    lora_vanilla:    standard LoRA, no P, no structured init
+    proj_sigma_tail: Σ's smallest eigenvectors → project W → init A/B
+    proj_sigma_middle: Σ's middle eigenvectors → project W → init A/B
+    weight_svd_tail: W's smallest singular components → init A/B
+    weight_svd_middle: W's middle singular components → init A/B""")
     parser.add_argument("--nsp_eps", type=float, default=0.05,
                         help="Epsilon parameter for NSP.")
     parser.add_argument("--nsp_weight", type=float, default=0.02,
@@ -99,7 +110,7 @@ def parse_args():
                         help="Reference dataset for training.")
     parser.add_argument("--reference_batch_size", type=int, default=32,
                         help="Batch size for reference dataset.")
-    parser.add_argument("--num_workers", type=int, default=4,
+    parser.add_argument("--num_workers", type=int, default=6,
                         help="Number of workers for data loading.")
 
     # 损失函数权重参数
@@ -111,12 +122,18 @@ def parse_args():
                         help="Weight for auxiliary linear classifier loss (0=disabled). "
                              "Adds a linear head on features during training to improve "
                              "feature separability for downstream LR-RGDA.")
+    parser.add_argument("--sce_a", type=float, default=0.5,
+                        help="Weight for CE in symmetric cross-entropy loss.")
+    parser.add_argument("--sce_b", type=float, default=0.5,
+                        help="Weight for RCE in symmetric cross-entropy loss.")
 
     # 分类器参数
     parser.add_argument("--alpha", type=float, default=0.5,
                         help="Weight for LR-RGDA classifier in ensemble.")
     parser.add_argument("--temperature", type=float, default=1.0,
                         help="Temperature for zero-shot classifier.")
+    parser.add_argument("--adaptive_ensemble", action='store_true', default=False,
+                        help="Use per-sample adaptive alpha based on classifier confidence.")
 
     # LR-RGDA 构建参数
     parser.add_argument("--rgda_rank", type=int, default=32,
@@ -183,21 +200,40 @@ def main(args):
         cov_loader = DataLoader(merged_dataset, batch_size=args.batch_size, shuffle=False)
         merged_loader = DataLoader(merged_dataset, batch_size=args.batch_size, shuffle=True)
 
-        # --- 2b. 训练模型 (LoRA-NSP) ---
+        # --- 2b. 初始化适配器（非标准 LoRA 时在训练前初始化） ---
+        if args.init_mode not in ["lora_nsp", "lora_vanilla"]:
+            logging.info(f"\n=== Initializing adapters ({args.init_mode}) ===")
+            if "proj_sigma" in args.init_mode and args.init_mode != "lora_nsp":
+                window = "tail" if "tail" in args.init_mode else "middle"
+                if trainer.covariance_history:
+                    trainer.model.vision_model.initialize_adapters_from_covariance(
+                        trainer.covariance_history, window=window)
+                else:
+                    logging.info("No covariance history yet, using default random init for Task 1")
+            elif "weight_svd" in args.init_mode:
+                window = "tail" if "tail" in args.init_mode else "middle"
+                trainer.model.vision_model.initialize_adapters_from_weight_svd(window=window)
+
+        # --- 2c. 训练模型 ---
         model = trainer.train(merged_loader, task_class_names, reference_loader,
                               aux_weight=args.aux_weight)
 
-        # --- 2c. 零空间投影 (NSP) 抗遗忘 ---
-        if args.lora_type in ["lora_nsp", "lora_sgp"]:
+        # --- 2d. 任务后处理：合入 + 协方差累积 ---
+        if args.init_mode == "lora_nsp":
             print("\n=== Applying Null-Space Projection (NSP) ===")
             covariances = trainer.extract_layer_covariances(cov_loader)
-            trainer.update_covariance_history(covariances)
             trainer.finalize_task_for_incremental()
+            trainer.update_covariance_history(covariances)
+        elif "proj_sigma" in args.init_mode:
+            print("\n=== Proj-Σ: Extracting covariances + merging ===")
+            covariances = trainer.extract_layer_covariances(cov_loader)
+            trainer.finalize_task_for_incremental()
+            trainer.update_covariance_history(covariances, update_projection=False)
         else:
-            print(f"\n=== Merging LoRA Weights (lora_type={args.lora_type}) ===")
+            print(f"\n=== Merging LoRA Weights (init_mode={args.init_mode}) ===")
             trainer.finalize_task_for_incremental()
 
-        # --- 2d. 提取特征并构建统计字典 ---
+        # --- 2e. 提取特征并构建统计字典 ---
         task_features = []
         task_labels = []
         label_offset = sum(len(c_names) for c_names in history_class_names)
@@ -224,7 +260,18 @@ def main(args):
         global_stats_dict.update(task_stats_dict)
         history_class_names.append(task_class_names)
 
-        # --- 2e. 构建分类器 ---
+        # --- 2f. 构建分类器 ---
+        # 计算数据集等权的全局协方差（避免类别多的任务主导 Σ_global）
+        offset = 0
+        per_dataset_covs = []
+        for hcn in history_class_names:
+            n_classes = len(hcn)
+            ds_cov = sum(global_stats_dict[cid].cov for cid in range(offset, offset + n_classes)) / n_classes
+            per_dataset_covs.append(ds_cov)
+            offset += n_classes
+
+        dataset_balanced_global_cov = sum(per_dataset_covs) / len(per_dataset_covs)
+
         lr_rgda_classifier = LRRGDAClassifier(
             stats_dict=global_stats_dict,
             device=args.device,
@@ -232,7 +279,8 @@ def main(args):
             qda_reg_alpha1=args.rgda_alpha1,
             qda_reg_alpha2=args.rgda_alpha2,
             qda_reg_alpha3=args.rgda_alpha3,
-            temperature=1.0
+            temperature=1.0,
+            global_cov=dataset_balanced_global_cov,
         )
 
         flat_class_names = [name for sublist in history_class_names for name in sublist]
@@ -240,7 +288,7 @@ def main(args):
         zeroshot_classifier = get_zeroshot_classifier(model, processor,
                                                       flat_class_names, args.device)
 
-        # --- 2f. 评估所有已学任务 ---
+        # --- 2g. 评估所有已学任务 ---
         print("\n=== Evaluating Task ===")
         step_accs_zs, step_accs_rgda, step_accs_ens = [], [], []
 

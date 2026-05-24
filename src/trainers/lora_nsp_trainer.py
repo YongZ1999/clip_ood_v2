@@ -13,6 +13,16 @@ from models.clip import get_clip_model
 from models.utils import feature_distillation_loss, cross_modal_distillation_loss
 
 
+def symmetric_cross_entropy_loss(logits, targets, sce_a=0.5, sce_b=0.5):
+    pred = F.softmax(logits, dim=1)
+    pred = torch.clamp(pred, min=1e-7, max=1.0)
+    label_one_hot = F.one_hot(targets, pred.size(1)).float().to(pred.device)
+    label_one_hot = torch.clamp(label_one_hot, min=1e-4, max=1.0)
+    ce_loss = -torch.sum(label_one_hot * torch.log(pred), dim=1).mean()
+    rce_loss = -torch.sum(pred * torch.log(label_one_hot), dim=1).mean()
+    return sce_a * ce_loss + sce_b * rce_loss
+
+
 class FeatureExtractorHook:
     """用于捕获中间层特征的Hook"""
     def __init__(self):
@@ -52,6 +62,7 @@ class LoRANSPTrainer:
         # 协方差历史（用于零空间约束）
         self.covariance_history = covariance_history or {}
         self.cov_momentum = getattr(args, 'cov_momentum', 0.9)
+        self.covariance_counts: Dict[str, int] = {}
         
         # 如果提供了历史协方差，立即更新投影矩阵
         if self.covariance_history:
@@ -176,38 +187,44 @@ class LoRANSPTrainer:
         logging.info(f"✓ Extracted incremental covariances for {len(covariances)} layers")
         return covariances
     
-    def update_covariance_history(self, new_covariances: Dict[str, torch.Tensor]):
+    def update_covariance_history(self, new_covariances: Dict[str, torch.Tensor],
+                                   update_projection: bool = True):
         """
-        使用滑动平均更新协方差历史，并更新投影矩阵
-        
+        使用等权平均更新协方差历史，并可选更新投影矩阵
+
         Args:
             new_covariances: 新提取的协方差字典
+            update_projection: 是否同时更新投影矩阵（Proj-Σ 模式下设为 False）
         """
-        logging.info(f"=== Updating Covariance History (momentum={self.cov_momentum}) ===")
-        
+        logging.info(f"=== Updating Covariance History (equal-weight) ===")
+
         updated_layers =[]
         new_layers =[]
-        
+
         for layer_name, new_cov in new_covariances.items():
             if layer_name in self.covariance_history:
-                # 滑动平均: history = α * history + (1-α) * new
+                # 等权平均: history = (old * count + new) / (count + 1)
+                count = self.covariance_counts.get(layer_name, 1)
                 old_cov = self.covariance_history[layer_name]
-                merged_cov = self.cov_momentum * old_cov + (1 - self.cov_momentum) * new_cov
+                merged_cov = (old_cov * count + new_cov) / (count + 1)
                 self.covariance_history[layer_name] = merged_cov
+                self.covariance_counts[layer_name] = count + 1
                 updated_layers.append(layer_name)
             else:
                 # 第一层，直接保存
                 self.covariance_history[layer_name] = new_cov
+                self.covariance_counts[layer_name] = 1
                 new_layers.append(layer_name)
-        
-        logging.info(f"  - Updated {len(updated_layers)} layers with sliding average")
+
+        logging.info(f"  - Updated {len(updated_layers)} layers with equal-weight average")
         logging.info(f"  - Added {len(new_layers)} new layers")
-        
-        # 更新投影矩阵
-        logging.info("=== Updating Projection Matrices ===")
-        self.model.vision_model.update_projection_matrices(self.covariance_history)
-        logging.info("✓ Projection matrices updated")
-        
+
+        # 可选更新投影矩阵（Proj-Σ / SVD-W 模式不需要构建 P）
+        if update_projection:
+            logging.info("=== Updating Projection Matrices ===")
+            self.model.vision_model.update_projection_matrices(self.covariance_history)
+            logging.info("✓ Projection matrices updated")
+
         # [修改点] 更新完投影后清理缓存
         torch.cuda.empty_cache()
     
@@ -272,18 +289,26 @@ class LoRANSPTrainer:
             num_classes = len(class_names)
             # 辅助头接收未归一化的投影特征，且不使用 bias
             aux_head = nn.Linear(feature_dim, num_classes, bias=False).to(self.device)
-            logging.info(f"✓ Auxiliary linear head created: {feature_dim} -> {num_classes} (bias=False, weight={aux_weight})")
-            opt_params = base_params + list(aux_head.parameters())
+            logging.info(f"✓ Auxiliary linear head created: {feature_dim} -> {num_classes} "
+                         f"(bias=False, weight={aux_weight}, lr=5e-3)")
+        
+        # 优化器（LoRA 用 base_lr，aux_head 用 1e-3）
+        base_lr = self.args.lr
+        if aux_head is not None:
+            optimizer = torch.optim.AdamW([
+                {'params': base_params, 'lr': base_lr, 'weight_decay': self.args.weight_decay},
+                {'params': list(aux_head.parameters()), 'lr': 5e-3, 'weight_decay': self.args.weight_decay},
+            ])
+            scheduler = CosineAnnealingLR(optimizer, T_max=self.args.iterations, eta_min=base_lr/3)
         else:
-            opt_params = base_params
-
-        # 优化器
-        optimizer, scheduler = self.get_optimizer(
-            opt_params,
-            self.args.lr,
-            self.args.weight_decay,
-            self.args.iterations
-        )
+            optimizer, scheduler = self.get_optimizer(
+                base_params,
+                base_lr,
+                self.args.weight_decay,
+                self.args.iterations
+            )
+            # scheduler 在 else 外共用
+            scheduler = CosineAnnealingLR(optimizer, T_max=self.args.iterations, eta_min=base_lr/3)
 
         logit_scale = self.model.logit_scale.detach()
 
@@ -294,6 +319,10 @@ class LoRANSPTrainer:
 
         ema_loss = None
         ema_acc = None
+        ema_aux_ce = 0.0
+        ema_aux_acc = 0.0
+        ema_fd = 0.0
+        ema_cd = 0.0
         ema_momentum = 0.95
 
         pbar = tqdm(range(self.args.iterations), desc="Training")
@@ -313,18 +342,24 @@ class LoRANSPTrainer:
             proj_feats = self.model.visual_projection(pooled)  # [batch, 512] 未归一化
             norm_feats = F.normalize(proj_feats, dim=-1)  # [batch, 512] 已归一化
 
+            sce_a = getattr(self.args, 'sce_a', 0.5)
+            sce_b = getattr(self.args, 'sce_b', 0.5)
+
             # 零样本对比损失（归一化特征）
             logits = logit_scale.exp() * (norm_feats @ classifier)
-            ce_loss = F.cross_entropy(logits, labels, label_smoothing=0.1)
+            ce_loss = symmetric_cross_entropy_loss(logits, labels, sce_a, sce_b)
             loss = ce_loss
 
             # 辅助线性分类头损失（未归一化特征，无 bias）
             l_aux_val = 0.0
+            aux_acc_val = 0.0
             if aux_head is not None:
                 aux_logits = aux_head(proj_feats)
-                aux_ce = F.cross_entropy(aux_logits, labels)
+                aux_ce = symmetric_cross_entropy_loss(aux_logits, labels, sce_a, sce_b)
                 loss = loss + aux_weight * aux_ce
                 l_aux_val = aux_ce.item()
+                aux_preds = aux_logits.argmax(dim=-1)
+                aux_acc_val = (aux_preds == labels).float().mean().item() * 100
 
             preds = logits.argmax(dim=-1)
             train_acc = (preds == labels).float().mean().item() * 100
@@ -364,25 +399,35 @@ class LoRANSPTrainer:
             if ema_loss is None:
                 ema_loss = loss_val
                 ema_acc = train_acc
+                ema_aux_ce = l_aux_val
+                ema_aux_acc = aux_acc_val
+                ema_fd = l_fd_val
+                ema_cd = l_cd_val
             else:
                 ema_loss = ema_momentum * ema_loss + (1 - ema_momentum) * loss_val
                 ema_acc = ema_momentum * ema_acc + (1 - ema_momentum) * train_acc
+                ema_aux_ce = ema_momentum * ema_aux_ce + (1 - ema_momentum) * l_aux_val
+                ema_aux_acc = ema_momentum * ema_aux_acc + (1 - ema_momentum) * aux_acc_val
+                ema_fd = ema_momentum * ema_fd + (1 - ema_momentum) * l_fd_val
+                ema_cd = ema_momentum * ema_cd + (1 - ema_momentum) * l_cd_val
 
             pbar.set_postfix({
                 'Loss': f"{ema_loss:.3f}",
-                'CE': f"{ce_loss.item():.3f}",
-                'Aux': f"{l_aux_val:.3f}",
-                'FD': f"{l_fd_val:.3f}",
-                'CD': f"{l_cd_val:.3f}",
-                'Acc': f"{ema_acc:.1f}%"
+                'Acc': f"{ema_acc:.1f}%",
+                'AuxCE': f"{ema_aux_ce:.3f}",
+                'AuxAcc': f"{ema_aux_acc:.1f}%",
+                'FD': f"{ema_fd:.4f}",
+                'CD': f"{ema_cd:.4f}",
             })
 
             step = i + 1
             if step % 50 == 0 or step == self.args.iterations:
                 log_msg = (f"Iter[{step:03d}/{self.args.iterations}] | "
-                           f"Loss: {ema_loss:.4f} | CE: {ce_loss.item():.4f} | "
-                           f"Aux: {l_aux_val:.4f} | "
-                           f"FD: {l_fd_val:.4f} | CD: {l_cd_val:.4f} | Acc: {ema_acc:.2f}%")
+                           f"Loss: {ema_loss:.4f} | Acc: {ema_acc:.2f}%")
+                if aux_head is not None:
+                    log_msg += f" | AuxCE: {ema_aux_ce:.4f} | AuxAcc: {ema_aux_acc:.2f}%"
+                if l_fd_val > 0:
+                    log_msg += f" | FD: {ema_fd:.4f} | CD: {ema_cd:.4f}"
                 logging.info(log_msg)
 
             if eval_interval > 0 and step % eval_interval == 0 and eval_callback is not None:
@@ -423,6 +468,7 @@ class LoRANSPTrainer:
         checkpoint = {
             'model_state_dict': self.model.state_dict(),
             'covariance_history': self.covariance_history,
+            'covariance_counts': self.covariance_counts,
             'cov_momentum': self.cov_momentum,
             'class_names': class_names,
             'stats_dict': stats_dict,  
@@ -438,10 +484,12 @@ class LoRANSPTrainer:
         
         # 恢复covariance_history
         covariance_history = checkpoint.get('covariance_history', {})
+        covariance_counts = checkpoint.get('covariance_counts', {})
         
         # 创建新的训练器实例
         trainer = cls(args, covariance_history=covariance_history)
         trainer.cov_momentum = checkpoint.get('cov_momentum', 0.9)
+        trainer.covariance_counts = covariance_counts
         
         # 加载模型权重
         trainer.model.load_state_dict(checkpoint['model_state_dict'])

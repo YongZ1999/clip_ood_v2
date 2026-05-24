@@ -36,8 +36,8 @@ class LRRGDAClassifier:
     """
 
     def __init__(
-        self, 
-        stats_dict: Dict[int, GaussianStatistics], 
+        self,
+        stats_dict: Dict[int, GaussianStatistics],
         device: str = 'cuda',
         rank: int = 32,
         qda_reg_alpha1: float = 0.2,
@@ -46,6 +46,7 @@ class LRRGDAClassifier:
         temperature: float = 1.0,
         M: int = 1,
         center_means: Optional[Dict[int, torch.Tensor]] = None,
+        global_cov: Optional[torch.Tensor] = None,
     ):
         """
         Args:
@@ -58,6 +59,8 @@ class LRRGDAClassifier:
             temperature: 温度参数（用于概率输出的softmax）
             M: 每类中心数（1=单中心）
             center_means: Dict[class_id, Tensor[M, D]]，M>1 时必填
+            global_cov: 外部全局协方差，若提供则每类协方差等权平均被忽略，
+                        用于数据集等权平衡
         """
         self.device = device
         self.stats_dict = stats_dict
@@ -72,6 +75,7 @@ class LRRGDAClassifier:
             temperature=temperature,
             device=device,
             center_means=center_means,
+            global_cov=global_cov,
         )
 
         self.classifier = builder.build(stats_dict)
@@ -112,30 +116,44 @@ class LRRGDAClassifier:
         return sorted(self.stats_dict.keys())
 
 class EnsembleClassifier:
-    def __init__(self, zeroshot_classifier, lr_rgda_classifier, alpha=0.5, num_id_classes=None):
+    def __init__(self, zeroshot_classifier, lr_rgda_classifier, alpha=0.5, num_id_classes=None,
+                 adaptive=False):
         self.zeroshot_classifier = zeroshot_classifier
         self.lr_rgda_classifier = lr_rgda_classifier
         self.alpha = alpha
         self.num_id_classes = num_id_classes
+        self.adaptive = adaptive
 
     def _get_ensemble_logits(self, features, logit_scale_zeroshot):
-        """内部辅助函数：计算融合后的 Logits """
-        # 1. 计算两边的原始 Logits 并进行数值稳定性处理 
+        """计算融合后的 Logits"""
         zs_logits = (features @ self.zeroshot_classifier) * logit_scale_zeroshot
-        zs_logits = zs_logits - zs_logits.max(dim=-1, keepdim=True).values
-        
         rgda_logits = self.lr_rgda_classifier.forward(features)
-        rgda_logits = rgda_logits - rgda_logits.max(dim=-1, keepdim=True).values
 
-        if self.num_id_classes is None:
-            # 场景1：全场融合
-            return (1 - self.alpha) * zs_logits + self.alpha * rgda_logits
+        if self.adaptive:
+            # 逐样本自适应权重：sigmoid(RGDA置信度 - ZS置信度)
+            zs_probs = F.softmax(zs_logits, dim=-1)
+            rgda_probs = F.softmax(rgda_logits, dim=-1)
+            zs_conf = zs_probs.max(dim=-1).values       # [B]
+            rgda_conf = rgda_probs.max(dim=-1).values    # [B]
+            alpha_sample = torch.sigmoid(rgda_conf - zs_conf).unsqueeze(-1)  # [B, 1]
+
+            if self.num_id_classes is None:
+                return (1 - alpha_sample) * zs_logits + alpha_sample * rgda_logits
+            else:
+                ensemble_logits = (1 - alpha_sample) * zs_logits
+                ensemble_logits[:, :self.num_id_classes] += alpha_sample.squeeze(-1) * rgda_logits
+                return ensemble_logits
         else:
-            # 场景2：ID区域
-            ensemble_logits = zs_logits * (1 - self.alpha)
-            # 只在 ID 对应的列上加上专家意见
-            ensemble_logits[:, :self.num_id_classes] += self.alpha * rgda_logits
-            return ensemble_logits
+            # 固定 α
+            zs_logits = zs_logits - zs_logits.max(dim=-1, keepdim=True).values
+            rgda_logits = rgda_logits - rgda_logits.max(dim=-1, keepdim=True).values
+
+            if self.num_id_classes is None:
+                return (1 - self.alpha) * zs_logits + self.alpha * rgda_logits
+            else:
+                ensemble_logits = zs_logits * (1 - self.alpha)
+                ensemble_logits[:, :self.num_id_classes] += self.alpha * rgda_logits
+                return ensemble_logits
 
     def predict_proba(self, features, logit_scale_zeroshot):
         """如确实需要概率（比如算置信度）"""
