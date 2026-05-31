@@ -514,3 +514,102 @@ def build_projection(
     # [修改点] 确保返回的 P 矩阵一定在显卡上，与模型权重设备对齐
     P = P.to(device='cuda')
     return P
+
+
+class LoRACLIPTextTransformer(nn.Module):
+    """
+    CLIP 文本编码器的 LoRA 包装器（与 LoRACLIPVisionTransformer 对称）
+
+    给 CLIPTextTransformer 的 12 层 Transformer 的 attention(q/k/v/out_proj)
+    和 MLP(fc1/fc2) 添加 LoRA（默认 DoRA），共 72 个 LoRA 模块。
+    支持 NSP/SGP 零空间投影，防止文本编码器灾难性遗忘。
+    """
+
+    def __init__(
+        self,
+        clip_text_model: nn.Module,
+        r: int,
+        lora_layer: Optional[Iterable[int]] = None,
+        use_soft_projection: bool = True,
+        weight_temp: float = 1.0,
+        weight_kind: str = "log1p",
+        weight_p: float = 1.0,
+        nsp_eps: float = 0.05,
+        nsp_weight: float = 0.02,
+        lora_class: type = SGPBaseDoRA,
+    ):
+        super().__init__()
+        assert r > 0
+        self.r = r
+        self.use_soft_projection = use_soft_projection
+        self.weight_temp = weight_temp
+        self.weight_kind = weight_kind
+        self.weight_p = weight_p
+        self.nsp_eps = nsp_eps
+        self.nsp_weight = nsp_weight
+
+        for p in clip_text_model.parameters():
+            p.requires_grad_(False)
+
+        self.lora_layer = list(lora_layer) if lora_layer is not None else list(
+            range(len(clip_text_model.encoder.layers))
+        )
+        self.lora_modules = nn.ModuleDict()
+
+        dev = clip_text_model.embeddings.token_embedding.weight.device
+        dtype = clip_text_model.embeddings.token_embedding.weight.dtype
+
+        def make_placeholder(d):
+            return FixedProjection(torch.eye(d, device=dev, dtype=dtype))
+
+        for idx, layer in enumerate(clip_text_model.encoder.layers):
+            if idx not in self.lora_layer:
+                continue
+            for proj_name in ["k_proj", "v_proj", "q_proj", "out_proj"]:
+                linear = getattr(layer.self_attn, proj_name)
+                proj = make_placeholder(linear.in_features)
+                lora_mod = lora_class(linear, r, proj)
+                setattr(layer.self_attn, proj_name, lora_mod)
+                self.lora_modules[f"layer_{idx}_attn_{proj_name}"] = lora_mod
+            for mlp_name in ["fc1", "fc2"]:
+                linear = getattr(layer.mlp, mlp_name)
+                proj = make_placeholder(linear.in_features)
+                lora_mod = lora_class(linear, r, proj)
+                setattr(layer.mlp, mlp_name, lora_mod)
+                self.lora_modules[f"layer_{idx}_mlp_{mlp_name}"] = lora_mod
+
+        self.clip_text_model = clip_text_model
+
+    @torch.no_grad()
+    def _ensure_merged_before_rebuild(self):
+        self.merge_lora_weights()
+
+    def update_projection_matrices(self, covariances: Dict[str, torch.Tensor]) -> None:
+        self._ensure_merged_before_rebuild()
+        for name, cov in covariances.items():
+            if name not in self.lora_modules:
+                continue
+            P = build_projection(
+                cov,
+                soft_projection=self.use_soft_projection,
+                weight_temp=self.weight_temp,
+                weight_kind=self.weight_kind,
+                weight_p=self.weight_p,
+                nsp_eps=self.nsp_eps,
+                nsp_weight=self.nsp_weight,
+            )
+            self.lora_modules[name].P = FixedProjection(P)
+
+    def forward(self, input_ids=None, attention_mask=None, **kwargs):
+        return self.clip_text_model(
+            input_ids=input_ids, attention_mask=attention_mask, **kwargs)
+
+    def get_module_names(self):
+        return list(self.lora_modules.keys())
+
+    def merge_lora_weights(self):
+        for mod in self.lora_modules.values():
+            mod.merge_lora_weights()
+
+    def get_params(self):
+        return [p for p in self.parameters() if p.requires_grad]

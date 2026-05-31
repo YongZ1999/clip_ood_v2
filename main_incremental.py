@@ -145,6 +145,12 @@ def parse_args():
     parser.add_argument("--rgda_alpha3", type=float, default=0.5,
                         help="qda_reg_alpha3 for LR-RGDA.")
 
+    # 文本编码器 LoRA 参数
+    parser.add_argument("--tune_text_encoder", type=lambda x: x.lower() == 'true', default=True,
+                        help="是否同时微调文本编码器（默认 True）。设为 False 则仅微调图像编码器。")
+    parser.add_argument("--text_lora_rank", type=int, default=4,
+                        help="文本编码器 LoRA rank（默认 4，与 image lora_rank 一致）。")
+
     args = parser.parse_args()
     # 将 dataset_sequence 转换为嵌套列表格式 [[d1], [d2], ...]
     args.dataset_sequence = [[d] for d in args.dataset_sequence]
@@ -168,6 +174,17 @@ def main(args):
 
     reference_loader = load_reference_dataset(args, trainer.model_pretrain,
                                               processor, args.device)
+
+    # 预收集所有数据集的类名，用于全局 ZS 分类器（text LoRA 每次 merge 后更新）
+    global_class_names = []
+    for task_datasets in args.dataset_sequence:
+        for d_name in task_datasets:
+            _, _, _, c_names = get_xtail_trainloader(
+                root=args.root, dataset_name=d_name,
+                transform_train=None, transform_test=None,
+                num_shots=args.num_shots, batch_size=args.batch_size
+            )
+            global_class_names.extend(c_names)
 
     # ========== 2. 增量学习循环 ==========
     history_class_names = []  # 记录所有已学类名列表的列表
@@ -221,9 +238,17 @@ def main(args):
         # --- 2d. 任务后处理：合入 + 协方差累积 ---
         if args.init_mode == "lora_nsp":
             print("\n=== Applying Null-Space Projection (NSP) ===")
+            # 图像编码器 NSP
             covariances = trainer.extract_layer_covariances(cov_loader)
+            # 文本编码器 NSP
+            if trainer.has_text_lora:
+                text_covariances = trainer.extract_text_covariances(task_class_names)
             trainer.finalize_task_for_incremental()
             trainer.update_covariance_history(covariances)
+            if trainer.has_text_lora:
+                trainer.update_text_covariance_history(text_covariances)
+            # 重算全局 ZS 分类器（文本编码器已更新）
+            global_zs_classifier = get_zeroshot_classifier(model, processor, global_class_names, args.device)
         elif "proj_sigma" in args.init_mode:
             print("\n=== Proj-Σ: Extracting covariances + merging ===")
             covariances = trainer.extract_layer_covariances(cov_loader)

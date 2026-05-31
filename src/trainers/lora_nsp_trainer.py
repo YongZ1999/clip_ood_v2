@@ -6,7 +6,6 @@ from tqdm import tqdm
 from typing import Dict, Optional
 import logging
 
-#[修改点: 配置全局 logging，设置日志显示的格式，包含时间、级别和具体信息]
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 from models.clip import get_clip_model
@@ -27,226 +26,232 @@ class FeatureExtractorHook:
     """用于捕获中间层特征的Hook"""
     def __init__(self):
         self.features =[]
-    
+
     def __call__(self, module, input, output):
-            # 捕获输入特征 (input是tuple，取第一个)
-            if isinstance(input, tuple):
-                x = input[0]
-            else:
-                x = input
-            # [修改点] 立即将特征转到 CPU，释放显存
-            self.features.append(x.detach().cpu())
-    
+        if isinstance(input, tuple):
+            x = input[0]
+        else:
+            x = input
+        self.features.append(x.detach().cpu())
+
     def clear(self):
-        # [修改点] 显式清空列表，用于增量计算时及时释放内存
         self.features =[]
-    
+
     def get_features(self):
-        # 合并所有batch的特征
         if len(self.features) == 0:
             return None
         return torch.cat(self.features, dim=0)
 
 
 class LoRANSPTrainer:
-    def __init__(self, args, covariance_history: Optional[Dict[str, torch.Tensor]] = None):
+    def __init__(self, args, covariance_history: Optional[Dict[str, torch.Tensor]] = None,
+                 text_covariance_history: Optional[Dict[str, torch.Tensor]] = None):
         self.args = args
         self.device = args.device
         self.model, self.processor = get_clip_model(args, train_mode='lora')
         self.model.to(self.device)
-        
+
+        # 检查是否启用了文本编码器 LoRA
+        self.has_text_lora = hasattr(self.model.text_model, 'lora_modules')
+
         # 预训练模型（用于蒸馏）
         self.model_pretrain, _ = get_clip_model(args, train_mode="frozen")
         self.model_pretrain.to(self.device)
-        
-        # 协方差历史（用于零空间约束）
+
+        # 协方差历史
         self.covariance_history = covariance_history or {}
+        self.text_covariance_history = text_covariance_history or {}
         self.cov_momentum = getattr(args, 'cov_momentum', 0.9)
         self.covariance_counts: Dict[str, int] = {}
-        
-        # 如果提供了历史协方差，立即更新投影矩阵
+        self.text_covariance_counts: Dict[str, int] = {}
+
+        # 加载图像协方差历史
         if self.covariance_history:
-            # [修改点: print 改为 logging.info，下同]
-            logging.info(f"Loading covariance history with {len(self.covariance_history)} layers")
+            logging.info(f"Loading image covariance history with {len(self.covariance_history)} layers")
             self.model.vision_model.update_projection_matrices(self.covariance_history)
-    
+        # 加载文本协方差历史
+        if self.text_covariance_history and self.has_text_lora:
+            logging.info(f"Loading text covariance history with {len(self.text_covariance_history)} layers")
+            self.model.text_model.update_projection_matrices(self.text_covariance_history)
+
     def encode_text(self, text):
         text_inputs = self.processor(text=text, return_tensors="pt", padding=True, truncation=True)
         text_inputs = {k: v.to(self.device) for k, v in text_inputs.items()}
         return self.model.get_text_features(**text_inputs)
-    
+
     def encode_image(self, img):
         return self.model.get_image_features(img)
-    
-    def zeroshot_classifier(self, classnames, templates):
-        zeroshot_weights =[]
-        with torch.no_grad():
-            for classname in classnames:
-                classname = classname.replace('_', ' ')
-                texts = [template(classname) for template in templates]
-                class_embeddings = self.encode_text(texts)
-                class_embeddings = class_embeddings / class_embeddings.norm(dim=-1, keepdim=True)
-                class_embedding = class_embeddings.mean(dim=0)
-                class_embedding /= class_embedding.norm()
-                zeroshot_weights.append(class_embedding)
+
+    def zeroshot_classifier(self, classnames, templates, use_grad=False):
+        """构造 ZS 分类器矩阵 [feature_dim, num_classes]（批量编码，可选梯度）"""
+        all_texts = []
+        class_text_counts = []
+        for classname in classnames:
+            classname = classname.replace('_', ' ')
+            texts = [template(classname) for template in templates]
+            all_texts.extend(texts)
+            class_text_counts.append(len(texts))
+
+        ctx = torch.enable_grad() if use_grad else torch.no_grad()
+        with ctx:
+            all_embeddings = self.encode_text(all_texts)
+            all_embeddings = all_embeddings / all_embeddings.norm(dim=-1, keepdim=True)
+
+        zeroshot_weights = []
+        start = 0
+        for count in class_text_counts:
+            class_embedding = all_embeddings[start:start + count].mean(dim=0)
+            class_embedding = class_embedding / class_embedding.norm()
+            zeroshot_weights.append(class_embedding)
+            start += count
+
         return torch.stack(zeroshot_weights, dim=1).to(self.device)
-    
+
     def get_optimizer(self, params, lr, weight_decay, iterations):
         optimizer = torch.optim.AdamW(params, lr, weight_decay=weight_decay)
         scheduler = CosineAnnealingLR(optimizer, T_max=iterations, eta_min=lr/3)
         return optimizer, scheduler
-    
-    @torch.no_grad()
-    def extract_layer_covariances(self, data_loader) -> Dict[str, torch.Tensor]:
-        """
-        提取所有LoRA层的非中心化协方差矩阵
-        
-        Returns:
-            covariances: {layer_name: cov_matrix}
-                cov_matrix = X^T X / N, shape [D, D]
-        """
-        # [修改点] 采用增量计算模式（Incremental Mode），解决大型数据集（如Sun397）导致的内存溢出卡死问题
-        logging.info("=== Extracting Layer Covariances (Memory-Safe Mode) ===")
-        
-        # [修改点] 手动清理显存碎片，为提取过程腾出空间
-        torch.cuda.empty_cache() 
+
+    def _extract_covariances_from_modules(self, lora_modules, forward_fn, data_iter,
+                                           desc="Collecting features"):
+        """通用协方差提取"""
+        torch.cuda.empty_cache()
         self.model.eval()
-        
-        # 获取所有LoRA模块名称
-        lora_module_names = self.model.vision_model.get_module_names()
-        logging.info(f"Found {len(lora_module_names)} LoRA modules")
-        
-        # 注册hooks并初始化累加器
-        hooks = {}
-        feature_extractors = {}
-        running_xtx = {} # 用于存储各层 X^T * X 的累加和
-        
-        for name in lora_module_names:
-            module = self.model.vision_model.lora_modules[name]
+
+        module_names = list(lora_modules.keys())
+        logging.info(f"Found {len(module_names)} LoRA modules")
+
+        hooks, feature_extractors, running_xtx = {}, {}, {}
+        for name in module_names:
             extractor = FeatureExtractorHook()
-            # [修改点: 删掉了 .linear] 直接在 LoRA 模块上注册钩子，兼容 SGPBaseDoRA
-            hook = module.register_forward_hook(extractor)
+            hook = lora_modules[name].register_forward_hook(extractor)
             hooks[name] = hook
             feature_extractors[name] = extractor
-            running_xtx[name] = None 
+            running_xtx[name] = None
 
         total_observations = 0
-        
-        # [修改点] 遍历数据，边提取边累加，计算完立即释放特征，防止堆积
-        for images, _ in tqdm(data_loader, desc="Collecting features", leave=False):
-            images = images.to(self.device)
-            _ = self.encode_image(images)  # 触发 hooks 抓取特征
-            
-            for name in lora_module_names:
-                # 获取当前 Batch 的特征 [Batch, Seq, Dim]
+        for batch_data in tqdm(data_iter, desc=desc, leave=False):
+            batch_input = batch_data[0] if isinstance(batch_data, (tuple, list)) else batch_data
+            batch_input = batch_input.to(self.device)
+            _ = forward_fn(batch_input)
+
+            for name in module_names:
                 batch_feats = feature_extractors[name].get_features()
-                
                 if batch_feats is not None:
-                    # [修改点] 强制转为 float32 避开溢出，并处理 Transformer 3D 输入
                     batch_feats = batch_feats.to(torch.float32)
                     if batch_feats.dim() == 3:
                         batch_feats = batch_feats.reshape(-1, batch_feats.shape[-1])
-                    
-                    # 在内存中计算当前 Batch 的矩阵平方和 (X^T * X)
                     xtx_batch = batch_feats.t() @ batch_feats
-                    
                     if running_xtx[name] is None:
                         running_xtx[name] = xtx_batch
                     else:
                         running_xtx[name] += xtx_batch
-                    
-                    # [关键步骤] 立即清空当前 Hook 里的特征列表，释放 RAM 空间
                     feature_extractors[name].clear()
-            
-            # 更新总观测样本数（Token总数）
+
             if batch_feats is not None:
                 total_observations += batch_feats.shape[0]
-        
-        # 计算最终协方差并应用平滑
+
         covariances = {}
-        for name in lora_module_names:
+        for name in module_names:
             if running_xtx[name] is not None:
-                # [修改点] 使用总观测数进行归一化
                 cov = running_xtx[name] / total_observations
-                
-                # [修改点] 数值平滑：微量抖动防止奇异矩阵，并确保完全对称
                 eps = 1e-6
-                cov = (cov + cov.t()) / 2.0  
+                cov = (cov + cov.t()) / 2.0
                 cov = cov + torch.eye(cov.shape[0], device=cov.device) * eps
-                
-                # 检查非法数值
                 if torch.isnan(cov).any() or torch.isinf(cov).any():
                     logging.warning(f"Layer {name} contains NaN or Inf. Cleaning...")
                     cov = torch.nan_to_num(cov, nan=0.0, posinf=1.0, neginf=-1.0)
-
-                covariances[name] = cov.to('cpu') 
-            
-            # 清理钩子
+                covariances[name] = cov.to('cpu')
             hooks[name].remove()
-        
-        logging.info(f"✓ Extracted incremental covariances for {len(covariances)} layers")
+
+        logging.info(f"Extracted covariances for {len(covariances)} layers")
         return covariances
-    
-    def update_covariance_history(self, new_covariances: Dict[str, torch.Tensor],
-                                   update_projection: bool = True):
-        """
-        使用等权平均更新协方差历史，并可选更新投影矩阵
 
-        Args:
-            new_covariances: 新提取的协方差字典
-            update_projection: 是否同时更新投影矩阵（Proj-Σ 模式下设为 False）
-        """
-        logging.info(f"=== Updating Covariance History (equal-weight) ===")
+    @torch.no_grad()
+    def extract_layer_covariances(self, data_loader) -> Dict[str, torch.Tensor]:
+        """提取图像编码器 LoRA 层的协方差矩阵"""
+        logging.info("=== Extracting Image Encoder Covariances ===")
+        return self._extract_covariances_from_modules(
+            lora_modules=self.model.vision_model.lora_modules,
+            forward_fn=lambda x: self.encode_image(x),
+            data_iter=data_loader,
+            desc="Collecting image features",
+        )
 
-        updated_layers =[]
-        new_layers =[]
+    @torch.no_grad()
+    def extract_text_covariances(self, class_names) -> Dict[str, torch.Tensor]:
+        """提取文本编码器 LoRA 层的协方差矩阵（用类名模板构造文本）"""
+        if not self.has_text_lora:
+            logging.info("Text LoRA not enabled, skipping text covariance extraction.")
+            return {}
 
+        logging.info("=== Extracting Text Encoder Covariances ===")
+        templates = [lambda x: f"a photo of a {x}."]
+        all_texts = []
+        for classname in class_names:
+            classname_clean = classname.replace('_', ' ')
+            all_texts.extend([template(classname_clean) for template in templates])
+
+        batch_size = self.args.batch_size
+        text_batches = []
+        for i in range(0, len(all_texts), batch_size):
+            batch_texts = all_texts[i:i + batch_size]
+            text_inputs = self.processor(text=batch_texts, return_tensors="pt", padding=True, truncation=True)
+            text_batches.append(text_inputs.input_ids)
+
+        return self._extract_covariances_from_modules(
+            lora_modules=self.model.text_model.lora_modules,
+            forward_fn=lambda input_ids: self.model.text_model(
+                input_ids=input_ids, attention_mask=(input_ids != 0).long()),
+            data_iter=text_batches,
+            desc="Collecting text features",
+        )
+
+    def update_covariance_history(self, new_covariances: Dict[str, torch.Tensor]):
+        """更新图像协方差历史并更新投影矩阵（等权平均）"""
+        logging.info(f"=== Updating Image Covariance History ===")
+        self._apply_covariance_update(
+            new_covariances, self.covariance_history, self.covariance_counts,
+            self.model.vision_model.update_projection_matrices, "image")
+
+    def update_text_covariance_history(self, new_covariances: Dict[str, torch.Tensor]):
+        """更新文本协方差历史并更新投影矩阵（等权平均）"""
+        if not new_covariances:
+            return
+        logging.info(f"=== Updating Text Covariance History ===")
+        self._apply_covariance_update(
+            new_covariances, self.text_covariance_history, self.text_covariance_counts,
+            self.model.text_model.update_projection_matrices, "text")
+
+    def _apply_covariance_update(self, new_covariances, history_dict, count_dict, update_fn, tag):
+        """通用协方差等权平均 + 投影矩阵更新"""
+        updated, new = 0, 0
         for layer_name, new_cov in new_covariances.items():
-            if layer_name in self.covariance_history:
-                # 等权平均: history = (old * count + new) / (count + 1)
-                count = self.covariance_counts.get(layer_name, 1)
-                old_cov = self.covariance_history[layer_name]
-                merged_cov = (old_cov * count + new_cov) / (count + 1)
-                self.covariance_history[layer_name] = merged_cov
-                self.covariance_counts[layer_name] = count + 1
-                updated_layers.append(layer_name)
+            if layer_name in history_dict:
+                cnt = count_dict.get(layer_name, 1)
+                old_cov = history_dict[layer_name]
+                merged_cov = (old_cov * cnt + new_cov) / (cnt + 1)
+                history_dict[layer_name] = merged_cov
+                count_dict[layer_name] = cnt + 1
+                updated += 1
             else:
-                # 第一层，直接保存
-                self.covariance_history[layer_name] = new_cov
-                self.covariance_counts[layer_name] = 1
-                new_layers.append(layer_name)
-
-        logging.info(f"  - Updated {len(updated_layers)} layers with equal-weight average")
-        logging.info(f"  - Added {len(new_layers)} new layers")
-
-        # 可选更新投影矩阵（Proj-Σ / SVD-W 模式不需要构建 P）
-        if update_projection:
-            logging.info("=== Updating Projection Matrices ===")
-            self.model.vision_model.update_projection_matrices(self.covariance_history)
-            logging.info("✓ Projection matrices updated")
-
-        # [修改点] 更新完投影后清理缓存
+                history_dict[layer_name] = new_cov
+                count_dict[layer_name] = 1
+                new += 1
+        logging.info(f"  [{tag}] Updated {updated} layers, Added {new} new layers")
+        update_fn(history_dict)
+        logging.info(f"  [{tag}] Projection matrices updated")
         torch.cuda.empty_cache()
-    
+
     def finalize_task_for_incremental(self) -> None:
-        """
-        增量学习：完成当前任务，准备下一个任务
-        """
+        """增量学习：合并 LoRA 并重置，同时处理图像和文本编码器"""
         logging.info("=== Finalizing Task for Incremental Learning ===")
-        
-        # [修改点] 增加防御性判断，防止函数名不匹配导致崩溃
+
+        # 图像编码器 merge + reset
         if hasattr(self.model.vision_model, 'merge_and_reset_for_incremental'):
-            # 如果有封装好的顶层函数，直接调用
             self.model.vision_model.merge_and_reset_for_incremental()
         else:
-            # [修改点] 如果没有顶层函数，手动遍历每个 LoRA 模块执行合并和重置
-            logging.info("Top-level merge method not found. Performing manual merge on LoRA modules...")
-            
-            # 获取所有 LoRA 模块字典
-            lora_modules = self.model.vision_model.lora_modules
-            
-            for name, module in lora_modules.items():
-                # [修改点] 正确的函数名是 merge_lora_weights
+            for name, module in self.model.vision_model.lora_modules.items():
                 if hasattr(module, 'merge_lora_weights'):
                     module.merge_lora_weights()
                 elif hasattr(module, 'merge_and_reinit'):
@@ -256,74 +261,73 @@ class LoRANSPTrainer:
                 elif hasattr(module, 'merge'):
                     module.merge()
                 else:
-                    logging.error(f"Module {name} has no known merge method! Available: {dir(module)}")
-                    raise AttributeError(f"LoRA module {name} lacks a merge/reset method.")
+                    raise AttributeError(f"Image LoRA module {name} lacks a merge/reset method.")
 
-        logging.info(f"✓ Task finalized: LoRA weights merged to main weights and reset.")
-    
+        # 文本编码器 merge + reset
+        if self.has_text_lora:
+            for name, module in self.model.text_model.lora_modules.items():
+                if hasattr(module, 'merge_lora_weights'):
+                    module.merge_lora_weights()
+                elif hasattr(module, 'merge_and_reinit'):
+                    module.merge_and_reinit()
+                elif hasattr(module, 'merge_and_reset'):
+                    module.merge_and_reset()
+                elif hasattr(module, 'merge'):
+                    module.merge()
+                else:
+                    raise AttributeError(f"Text LoRA module {name} lacks a merge/reset method.")
+
+        logging.info("Task finalized: LoRA weights merged and reset for both encoders.")
+
     def train(self, train_loader, class_names, reference_loader,
-              eval_interval: int = 0, eval_callback=None,
-              aux_weight: float = 0.0):
+              eval_interval=0, eval_callback=None, aux_weight=0.0):
         """
         训练模型
 
-        Args:
-            train_loader: 训练数据加载器
-            class_names: 类别名称列表
-            reference_loader: 参考数据集加载器（用于蒸馏）
-            eval_interval: 每 N 步调用一次 eval_callback（0 表示不调用）
-            eval_callback: 回调函数 fn(model, step)，在 eval_interval 步时调用
-            aux_weight: 辅助线性分类头损失权重（0=禁用）。在特征空间直接计算 CE 损失，
-                        帮助特征更具线性可分性，提升下游 LR-RGDA 分类器性能。
+        [text LoRA] 若启用 text LoRA：
+          - 每步批量编码类名重算 ZS 分类器（use_grad=True），让文本编码器通过 CE 损失获得梯度
+          - 增量场景每任务 ~100 类，显存安全；联合场景 1100 类时自动随机采样 max_zs_classes 个类
+          - CD 损失使用 student text encoder 编码参考文本
         """
-        # 预计算零样本分类器权重
+        import random as _random
+
         templates = [lambda x: f"a photo of a {x}."]
-        classifier = self.zeroshot_classifier(class_names, templates)
+        n_classes = len(class_names)
+        max_zs_classes = getattr(self.args, 'max_zs_classes', 128)
 
-        # 确定优化器参数（LoRA params + 可选的辅助分类头）
-        base_params = list(self.model.vision_model.get_params())
+        if self.has_text_lora:
+            precomputed_classifier = None
+        else:
+            precomputed_classifier = self.zeroshot_classifier(class_names, templates)
 
-        aux_head = None
+        # 优化器：图像 + 文本 LoRA 参数
+        trainable_params = list(self.model.vision_model.get_params())
+        if self.has_text_lora:
+            trainable_params += list(self.model.text_model.get_params())
+
+        base_lr = self.args.lr
         if aux_weight > 0:
             feature_dim = self.model.config.projection_dim
-            num_classes = len(class_names)
-            # 辅助头接收未归一化的投影特征，且不使用 bias
-            aux_head = nn.Linear(feature_dim, num_classes, bias=False).to(self.device)
-            logging.info(f"✓ Auxiliary linear head created: {feature_dim} -> {num_classes} "
-                         f"(bias=False, weight={aux_weight}, lr=5e-3)")
-        
-        # 优化器（LoRA 用 base_lr，aux_head 用 1e-3）
-        base_lr = self.args.lr
-        if aux_head is not None:
+            self.aux_head = nn.Linear(feature_dim, n_classes, bias=False).to(self.device)
             optimizer = torch.optim.AdamW([
-                {'params': base_params, 'lr': base_lr, 'weight_decay': self.args.weight_decay},
-                {'params': list(aux_head.parameters()), 'lr': 5e-3, 'weight_decay': self.args.weight_decay},
-            ])
-            scheduler = CosineAnnealingLR(optimizer, T_max=self.args.iterations, eta_min=base_lr/3)
+                {'params': trainable_params, 'lr': base_lr},
+                {'params': self.aux_head.parameters(), 'lr': 5e-3},
+            ], weight_decay=self.args.weight_decay)
         else:
-            optimizer, scheduler = self.get_optimizer(
-                base_params,
-                base_lr,
-                self.args.weight_decay,
-                self.args.iterations
-            )
-            # scheduler 在 else 外共用
-            scheduler = CosineAnnealingLR(optimizer, T_max=self.args.iterations, eta_min=base_lr/3)
+            self.aux_head = None
+            optimizer = torch.optim.AdamW(trainable_params, base_lr,
+                                          weight_decay=self.args.weight_decay)
+        scheduler = CosineAnnealingLR(optimizer, T_max=self.args.iterations,
+                                      eta_min=base_lr / 3)
 
         logit_scale = self.model.logit_scale.detach()
 
-        # 训练循环
         self.model.train()
         train_iter = iter(train_loader)
         ref_iter = iter(reference_loader) if reference_loader is not None else None
 
-        ema_loss = None
-        ema_acc = None
-        ema_aux_ce = 0.0
-        ema_aux_acc = 0.0
-        ema_fd = 0.0
-        ema_cd = 0.0
-        ema_momentum = 0.95
+        ema_loss = torch.tensor(0.0)
+        ema_acc = torch.tensor(0.0)
 
         pbar = tqdm(range(self.args.iterations), desc="Training")
         for i in pbar:
@@ -336,162 +340,178 @@ class LoRANSPTrainer:
             images = images.to(self.device)
             labels = labels.to(self.device)
 
-            # 单次前向：同时获取未归一化和归一化特征
+            # --- 前向传播 ---
             vision_outputs = self.model.vision_model(images)
-            pooled = vision_outputs[1]  # [batch, 768] pooled CLS token
-            proj_feats = self.model.visual_projection(pooled)  # [batch, 512] 未归一化
-            norm_feats = F.normalize(proj_feats, dim=-1)  # [batch, 512] 已归一化
+            pooled = vision_outputs[1]
+            proj_feats = self.model.visual_projection(pooled)
+            norm_feats = proj_feats / proj_feats.norm(dim=-1, keepdim=True)
 
-            sce_a = getattr(self.args, 'sce_a', 0.5)
-            sce_b = getattr(self.args, 'sce_b', 0.5)
+            # --- ZS 分类器 ---
+            if self.has_text_lora:
+                if n_classes > max_zs_classes:
+                    # 联合训练场景：随机采样子集控制显存
+                    batch_classes = labels.unique().tolist()
+                    n_remaining = max_zs_classes - len(batch_classes)
+                    if n_remaining > 0:
+                        other_classes = [c for c in range(n_classes) if c not in batch_classes]
+                        sampled = _random.sample(other_classes, min(n_remaining, len(other_classes)))
+                        zs_class_indices = batch_classes + sampled
+                    else:
+                        zs_class_indices = batch_classes[:max_zs_classes]
+                    zs_class_names = [class_names[idx] for idx in zs_class_indices]
+                    classifier = self.zeroshot_classifier(zs_class_names, templates, use_grad=True)
+                    idx_to_subidx = {orig: new for new, orig in enumerate(zs_class_indices)}
+                    remapped_labels = torch.tensor(
+                        [idx_to_subidx.get(lb.item(), -100) for lb in labels], device=labels.device)
+                else:
+                    # 增量训练场景：全量类名编码（~100 类，显存安全）
+                    classifier = self.zeroshot_classifier(class_names, templates, use_grad=True)
+                    remapped_labels = labels
+            else:
+                classifier = precomputed_classifier
+                remapped_labels = labels
 
-            # 零样本对比损失（归一化特征）
             logits = logit_scale.exp() * (norm_feats @ classifier)
-            ce_loss = symmetric_cross_entropy_loss(logits, labels, sce_a, sce_b)
+
+            # SCE 损失
+            ce_loss = symmetric_cross_entropy_loss(
+                logits, remapped_labels,
+                getattr(self.args, 'sce_a', 0.5), getattr(self.args, 'sce_b', 0.5))
             loss = ce_loss
 
-            # 辅助线性分类头损失（未归一化特征，无 bias）
-            l_aux_val = 0.0
-            aux_acc_val = 0.0
-            if aux_head is not None:
-                aux_logits = aux_head(proj_feats)
-                aux_ce = symmetric_cross_entropy_loss(aux_logits, labels, sce_a, sce_b)
-                loss = loss + aux_weight * aux_ce
-                l_aux_val = aux_ce.item()
+            preds = logits.argmax(dim=-1)
+            valid_mask = (remapped_labels != -100) if self.has_text_lora and n_classes > max_zs_classes else None
+            if valid_mask is not None and valid_mask.any():
+                train_acc = (preds[valid_mask] == remapped_labels[valid_mask]).float().mean().item() * 100
+            elif valid_mask is not None and not valid_mask.any():
+                train_acc = 0.0
+            else:
+                train_acc = (preds == remapped_labels).float().mean().item() * 100
+
+            aux_ce_val, aux_acc_val = 0.0, 0.0
+
+            # --- 辅助分类头 ---
+            if self.aux_head is not None:
+                aux_logits = self.aux_head(proj_feats)
+                aux_loss = symmetric_cross_entropy_loss(
+                    aux_logits, labels,
+                    getattr(self.args, 'sce_a', 0.5), getattr(self.args, 'sce_b', 0.5))
+                loss = loss + aux_weight * aux_loss
+                aux_ce_val = aux_loss.item()
                 aux_preds = aux_logits.argmax(dim=-1)
                 aux_acc_val = (aux_preds == labels).float().mean().item() * 100
 
-            preds = logits.argmax(dim=-1)
-            train_acc = (preds == labels).float().mean().item() * 100
-
             l_fd_val, l_cd_val = 0.0, 0.0
 
+            # --- 蒸馏损失 ---
             if reference_loader is not None and ref_iter is not None:
                 try:
-                    r_imgs, _, t_img_f, t_txt_f = next(ref_iter)
+                    r_imgs, r_texts, t_img_f, t_txt_f = next(ref_iter)
                 except StopIteration:
                     ref_iter = iter(reference_loader)
-                    r_imgs, _, t_img_f, t_txt_f = next(ref_iter)
+                    r_imgs, r_texts, t_img_f, t_txt_f = next(ref_iter)
 
                 r_imgs = r_imgs.to(self.device)
                 t_img_f = t_img_f.to(self.device)
                 t_txt_f = t_txt_f.to(self.device)
 
-                s_img_f = self.encode_image(r_imgs)
+                r_vision = self.model.vision_model(r_imgs)
+                s_img_f = self.model.visual_projection(r_vision[1])
                 s_img_f = s_img_f / s_img_f.norm(dim=-1, keepdim=True)
 
                 l_fd = feature_distillation_loss(t_img_f, s_img_f)
-                l_cd = cross_modal_distillation_loss(logit_scale, s_img_f, t_txt_f, t_img_f, t_txt_f, 2.0)
-
                 l_fd_val = l_fd.item()
+
+                # text LoRA 启用时：student 文本特征来自 LoRA 文本编码器
+                if self.has_text_lora:
+                    s_txt_f = self.encode_text(r_texts)
+                    s_txt_f = s_txt_f / s_txt_f.norm(dim=-1, keepdim=True)
+                else:
+                    s_txt_f = t_txt_f
+
+                l_cd = cross_modal_distillation_loss(
+                    logit_scale, s_img_f, s_txt_f, t_img_f, t_txt_f, 2.0)
                 l_cd_val = l_cd.item()
 
-                loss += self.args.fd_weight * l_fd + self.args.cd_weight * l_cd
+                loss = loss + self.args.fd_weight * l_fd + self.args.cd_weight * l_cd
 
+            # --- 反向传播 ---
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
             scheduler.step()
 
-            loss_val = loss.item()
-
-            # EMA 更新
-            if ema_loss is None:
-                ema_loss = loss_val
-                ema_acc = train_acc
-                ema_aux_ce = l_aux_val
-                ema_aux_acc = aux_acc_val
-                ema_fd = l_fd_val
-                ema_cd = l_cd_val
-            else:
-                ema_loss = ema_momentum * ema_loss + (1 - ema_momentum) * loss_val
-                ema_acc = ema_momentum * ema_acc + (1 - ema_momentum) * train_acc
-                ema_aux_ce = ema_momentum * ema_aux_ce + (1 - ema_momentum) * l_aux_val
-                ema_aux_acc = ema_momentum * ema_aux_acc + (1 - ema_momentum) * aux_acc_val
-                ema_fd = ema_momentum * ema_fd + (1 - ema_momentum) * l_fd_val
-                ema_cd = ema_momentum * ema_cd + (1 - ema_momentum) * l_cd_val
+            ema_loss = 0.95 * ema_loss + 0.05 * loss.item()
+            ema_acc = 0.95 * ema_acc + 0.05 * train_acc
 
             pbar.set_postfix({
-                'Loss': f"{ema_loss:.3f}",
-                'Acc': f"{ema_acc:.1f}%",
-                'AuxCE': f"{ema_aux_ce:.3f}",
-                'AuxAcc': f"{ema_aux_acc:.1f}%",
-                'FD': f"{ema_fd:.4f}",
-                'CD': f"{ema_cd:.4f}",
+                'Loss': f"{ema_loss.item():.3f}",
+                'Acc': f"{ema_acc.item():.1f}%",
+                'AuxCE': f"{aux_ce_val:.3f}",
+                'AuxAcc': f"{aux_acc_val:.1f}%",
+                'FD': f"{l_fd_val:.4f}",
+                'CD': f"{l_cd_val:.4f}",
             })
 
-            step = i + 1
-            if step % 50 == 0 or step == self.args.iterations:
-                log_msg = (f"Iter[{step:03d}/{self.args.iterations}] | "
-                           f"Loss: {ema_loss:.4f} | Acc: {ema_acc:.2f}%")
-                if aux_head is not None:
-                    log_msg += f" | AuxCE: {ema_aux_ce:.4f} | AuxAcc: {ema_aux_acc:.2f}%"
-                if l_fd_val > 0:
-                    log_msg += f" | FD: {ema_fd:.4f} | CD: {ema_cd:.4f}"
-                logging.info(log_msg)
+            if (i + 1) % 50 == 0 or (i + 1) == self.args.iterations:
+                logging.info(f"Iter[{i+1:03d}/{self.args.iterations}] | "
+                             f"Loss: {ema_loss.item():.4f} | Acc: {ema_acc.item():.2f}% | "
+                             f"AuxCE: {aux_ce_val:.4f} | AuxAcc: {aux_acc_val:.2f}% | "
+                             f"FD: {l_fd_val:.4f} | CD: {l_cd_val:.4f}")
 
-            if eval_interval > 0 and step % eval_interval == 0 and eval_callback is not None:
-                self.model.eval()
-                eval_callback(self.model, step)
+            if eval_interval > 0 and eval_callback is not None and (i + 1) % eval_interval == 0:
+                eval_callback(self.model, i + 1)
                 self.model.train()
 
         return self.model
-    
+
     def evaluate(self, test_loader, class_names):
         self.model.eval()
         correct = 0
         total = 0
-        
-        templates =[lambda x: f"a photo of a {x}."]
+
+        templates = [lambda x: f"a photo of a {x}."]
         classifier = self.zeroshot_classifier(class_names, templates)
         logit_scale = self.model.logit_scale.detach()
-        
+
         with torch.no_grad():
             for images, labels in test_loader:
                 images = images.to(self.device)
                 labels = labels.to(self.device)
-                
+
                 img_feats = self.encode_image(images)
                 img_feats = img_feats / img_feats.norm(dim=-1, keepdim=True)
-                
+
                 logits = logit_scale.exp() * (img_feats @ classifier)
                 _, predicted = torch.max(logits, 1)
-                
+
                 total += labels.size(0)
                 correct += (predicted == labels).sum().item()
-        
+
         accuracy = 100 * correct / total
         return accuracy
-    
+
     def save_checkpoint(self, path, class_names, stats_dict=None):
-        """保存训练器状态（包括covariance_history）"""
         checkpoint = {
             'model_state_dict': self.model.state_dict(),
             'covariance_history': self.covariance_history,
-            'covariance_counts': self.covariance_counts,
+            'text_covariance_history': self.text_covariance_history,
             'cov_momentum': self.cov_momentum,
             'class_names': class_names,
-            'stats_dict': stats_dict,  
+            'stats_dict': stats_dict,
             'args': vars(self.args),
         }
         torch.save(checkpoint, path)
-        logging.info(f"✓ Checkpoint saved: {path}") # [修改点: print改为了logging]
-    
+        logging.info(f"Checkpoint saved: {path}")
+
     @classmethod
     def from_checkpoint(cls, checkpoint_path, args, device='cuda'):
-        """从checkpoint恢复训练器"""
         checkpoint = torch.load(checkpoint_path, map_location='cpu')
-        
-        # 恢复covariance_history
         covariance_history = checkpoint.get('covariance_history', {})
-        covariance_counts = checkpoint.get('covariance_counts', {})
-        
-        # 创建新的训练器实例
-        trainer = cls(args, covariance_history=covariance_history)
+        text_covariance_history = checkpoint.get('text_covariance_history', {})
+
+        trainer = cls(args, covariance_history=covariance_history,
+                      text_covariance_history=text_covariance_history)
         trainer.cov_momentum = checkpoint.get('cov_momentum', 0.9)
-        trainer.covariance_counts = covariance_counts
-        
-        # 加载模型权重
         trainer.model.load_state_dict(checkpoint['model_state_dict'])
-        
         return trainer

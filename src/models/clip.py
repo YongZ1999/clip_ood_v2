@@ -1,6 +1,6 @@
 # In[]
 from torch import nn
-from src.models.lora_sgp import LoRACLIPVisionTransformer
+from src.models.lora_sgp import LoRACLIPVisionTransformer, LoRACLIPTextTransformer
 from src.models.lora_baseline import VanillaLoRACLIPVisionTransformer
 from transformers import CLIPModel, CLIPProcessor
 import os
@@ -42,7 +42,6 @@ def get_clip_model(args, train_mode="lora"):
                 lora_dropout=dropout)
         
         elif lora_type == 'lora_nsp':
-            # LoRA + NSP（硬投影）
             use_soft_projection = False
             model.vision_model = LoRACLIPVisionTransformer(
                 model.vision_model,
@@ -50,9 +49,16 @@ def get_clip_model(args, train_mode="lora"):
                 use_soft_projection=use_soft_projection,
                 nsp_eps=getattr(args, 'nsp_eps', 0.05),
                 nsp_weight=getattr(args, 'nsp_weight', 0.02))
-        
+            # 同时给文本编码器添加 LoRA + NSP
+            if getattr(args, 'tune_text_encoder', True):
+                model.text_model = LoRACLIPTextTransformer(
+                    model.text_model,
+                    r=getattr(args, 'text_lora_rank', 4),
+                    use_soft_projection=use_soft_projection,
+                    nsp_eps=getattr(args, 'nsp_eps', 0.05),
+                    nsp_weight=getattr(args, 'nsp_weight', 0.02))
+
         elif lora_type == "lora_sgp":
-            # LoRA + SGP（软投影）
             use_soft_projection = True
             model.vision_model = LoRACLIPVisionTransformer(
                 model.vision_model,
@@ -61,9 +67,17 @@ def get_clip_model(args, train_mode="lora"):
                 use_soft_projection=use_soft_projection,
                 weight_kind=getattr(args, 'weight_kind', 'log1p'),
                 weight_p=getattr(args, 'weight_p', 1.0))
+            if getattr(args, 'tune_text_encoder', True):
+                model.text_model = LoRACLIPTextTransformer(
+                    model.text_model,
+                    r=getattr(args, 'text_lora_rank', 4),
+                    weight_temp=getattr(args, 'weight_temp', 1.0),
+                    use_soft_projection=use_soft_projection,
+                    weight_kind=getattr(args, 'weight_kind', 'log1p'),
+                    weight_p=getattr(args, 'weight_p', 1.0))
         else:
             raise ValueError(f"Unsupported lora_type: {lora_type}")
-        
+
         return model, processor
 
     else:

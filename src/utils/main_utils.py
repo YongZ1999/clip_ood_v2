@@ -28,20 +28,30 @@ def fix_random_seed(seed=42):
 
 
 def get_zeroshot_classifier(model, processor, class_names, device):
-    """构建零样本分类器"""
+    """构建零样本分类器（批量编码，支持 text LoRA）"""
     templates = [lambda x: f"a photo of a {x}."]
-    zeroshot_weights = []
+    all_texts = []
+    class_text_counts = []
+    for classname in class_names:
+        classname = classname.replace('_', ' ')
+        texts = [template(classname) for template in templates]
+        all_texts.extend(texts)
+        class_text_counts.append(len(texts))
+
     with torch.no_grad():
-        for classname in class_names:
-            classname = classname.replace('_', ' ')
-            texts = [template(classname) for template in templates]
-            text_inputs = processor(text=texts, return_tensors="pt", padding=True, truncation=True)
-            text_inputs = {k: v.to(device) for k, v in text_inputs.items()}
-            class_embeddings = model.get_text_features(**text_inputs)
-            class_embeddings = class_embeddings / class_embeddings.norm(dim=-1, keepdim=True)
-            class_embedding = class_embeddings.mean(dim=0)
-            class_embedding /= class_embedding.norm()
-            zeroshot_weights.append(class_embedding)
+        text_inputs = processor(text=all_texts, return_tensors="pt", padding=True, truncation=True)
+        text_inputs = {k: v.to(device) for k, v in text_inputs.items()}
+        all_embeddings = model.get_text_features(**text_inputs)
+        all_embeddings = all_embeddings / all_embeddings.norm(dim=-1, keepdim=True)
+
+    zeroshot_weights = []
+    start = 0
+    for count in class_text_counts:
+        class_embedding = all_embeddings[start:start + count].mean(dim=0)
+        class_embedding = class_embedding / class_embedding.norm()
+        zeroshot_weights.append(class_embedding)
+        start += count
+
     return torch.stack(zeroshot_weights, dim=1).to(device)
 
 
@@ -270,7 +280,7 @@ def get_full_stats(matrix):
             if k == 0:
                 trans.append(0.0)  # placeholder for display
             else:
-                trans.append(sum(matrix[k][j] for j in range(k)) / k)
+                trans.append(sum(matrix[j][k] for j in range(k)) / k)
         # Transfer = mean of Transfer_k for k=2..K (K-1 values)
         transfer_values = [trans[k] for k in range(1, K)]
         transfer_total_avg = sum(transfer_values) / len(transfer_values)

@@ -150,6 +150,12 @@ def parse_args():
                         help="Number of centers per class for multi-center LR-RGDA.\n"
                              "1=standard single-center, >1=k-means multi-center.")
 
+    # 文本编码器 LoRA 参数（联合训练默认关闭，1100 类全量编码显存不足）
+    parser.add_argument("--tune_text_encoder", type=lambda x: x.lower() == 'true', default=False,
+                        help="是否同时微调文本编码器（默认 False）。联合训练类多，显存压力大。")
+    parser.add_argument("--text_lora_rank", type=int, default=4,
+                        help="文本编码器 LoRA rank（默认 4）。")
+
     args = parser.parse_args()
 
     # 支持 'ALL' 简写

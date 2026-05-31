@@ -99,3 +99,10 @@ Thumbs.db
 
 # Git
 .gitignore~
+
+# Local project documentation (not for upstream)
+BUG_TRANSFER_INDEX.md
+LRRGDA_DERIVATION.md
+PROJECT_TUTORIAL.md
+PROJECT_TUTORIAL_CLASSIFIER.md
+V1_TO_V2_CHANGELOG.md
