@@ -106,10 +106,10 @@ def parse_args():
                         help="Number of workers for data loading.")
 
     # 损失函数权重参数
-    parser.add_argument("--fd_weight", type=float, default=1.0,
-                        help="Weight for feature distillation loss.")
-    parser.add_argument("--cd_weight", type=float, default=1.0,
-                        help="Weight for cross-modal distillation loss.")
+    parser.add_argument("--fd_weight", type=float, default=0.0,
+                        help="Weight for feature distillation loss (0=disabled).")
+    parser.add_argument("--cd_weight", type=float, default=0.0,
+                        help="Weight for cross-modal distillation loss (0=disabled).")
     parser.add_argument("--aux_weight", type=float, default=0.0,
                         help="Weight for auxiliary linear classifier loss (0=disabled). "
                              "Adds a linear head on features during training to improve "
@@ -155,6 +155,8 @@ def parse_args():
                         help="是否同时微调文本编码器（默认 False）。联合训练类多，显存压力大。")
     parser.add_argument("--text_lora_rank", type=int, default=4,
                         help="文本编码器 LoRA rank（默认 4）。")
+    parser.add_argument("--tune_vision_encoder", type=lambda x: x.lower() == 'true', default=False,
+                        help="是否微调视觉编码器（默认 False）。设为 True 则微调视觉编码器。")
 
     args = parser.parse_args()
 
@@ -293,9 +295,13 @@ def main(args):
 
     all_class_names = []
     if tune_student:
-        # 只有在微调时才加载参考数据集
-        reference_loader = load_reference_dataset(args, trainer.model_pretrain,
-                                                  processor, args.device)
+        # 只有在微调且蒸馏损失权重 > 0 时才加载参考数据集
+        use_distillation = args.fd_weight > 0 or args.cd_weight > 0
+        if use_distillation:
+            reference_loader = load_reference_dataset(args, trainer.model_pretrain,
+                                                      processor, args.device)
+        else:
+            reference_loader = None
 
         # 2a. 准备联合训练数据
         logging.info("\n=== Preparing Joint Training Data ===")

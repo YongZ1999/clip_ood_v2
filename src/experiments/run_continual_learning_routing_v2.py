@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
 """
-持续学习实验（带自适应路由）- 修正版
-支持方法 B (Pretrain + Routing) 和 方法 E (LoRA-NSP Full)
+持续学习实验（带自适应路由）- 修正版 [已废弃]
 
-核心修正：
-- 评估所有10个任务的分类准确率（不只是ID任务）
-- 通过自适应路由统一处理所有样本
-- 目标是：ID性能提升，OOD性能不下降（相对于零样本）
+此文件依赖已删除的 OOD 检测模块（src/detectors/, src/routing/），
+不再可运行。路由功能已从项目中移除，请使用 main_incremental.py 替代。
 """
 
 import os
@@ -22,9 +19,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 
 from transformers import CLIPModel, CLIPProcessor
 from src.classifiers.lr_rgda_classifier import LRRGDAClassifier, EnsembleClassifier
-from src.detectors.ood_detector import ClassifierBasedOODDetector, MahalanobisOODDetector
 from src.classifiers.gaussian_statistics import build_stats_dict_from_features
-from src.routing.adaptive_router import AdaptiveRouter
 from src.utils.continual_metrics import ContinualLearningMetrics
 from utils_data import get_xtail_trainloader, get_xtail_testloader, get_transforms
 

@@ -1,0 +1,142 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
+from sklearn.cluster import KMeans
+import logging
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+
+class LADAClassifier(nn.Module):
+    """
+    LADA 分类器：基于 k-means 聚类中心 + 指数亲和变换
+
+    核心公式：
+        affinity = image_features @ lada_features  # (N, K_total)
+        lada_logits = exp(-β * (1 - affinity)) @ classifier  # (N, C_total)
+
+    增量学习：
+        - prev_lada_features: (D, K_prev) 历史任务的聚类中心（冻结）
+        - curr_lada_features: (D, K_curr) 当前任务的聚类中心（可学习）
+        - joint_classifier: (K_total, C_total) 块对角 one-hot 矩阵
+    """
+
+    def __init__(self, feature_dim: int, beta: float = 1.0):
+        super().__init__()
+        self.feature_dim = feature_dim
+        self.beta = beta
+
+        self.register_buffer('prev_lada_features', torch.empty(feature_dim, 0))
+        self.register_buffer('joint_classifier', torch.empty(0, 0))
+
+        self.curr_lada_features = None
+        self.curr_classifier = None
+
+        self.num_prev_classes = 0
+        self.num_curr_classes = 0
+
+    def build_from_data(self, features, labels, k=16, label_offset=0):
+        """
+        从训练数据构建当前任务的 LADA features
+
+        Args:
+            features: (N, D) 归一化后的图像特征
+            labels: (N,) 类别标签（局部空间，从 0 开始）
+            k: 每类聚类中心数
+            label_offset: 当前任务在全局标签空间的偏移量
+        """
+        device = features.device
+        features_np = features.cpu().numpy()
+        labels_np = labels.cpu().numpy()
+
+        unique_labels = np.unique(labels_np)
+        num_classes = len(unique_labels)
+
+        selected_features = []
+        selected_labels = []
+
+        for lbl in unique_labels:
+            lbl_indices = np.where(labels_np == lbl)[0]
+            lbl_features = features_np[lbl_indices]
+
+            actual_k = min(k, len(lbl_features))
+            kmeans = KMeans(n_clusters=actual_k, n_init=10, random_state=42).fit(lbl_features)
+            cluster_centers = kmeans.cluster_centers_
+
+            selected_features.append(cluster_centers)
+            selected_labels.append(np.full(actual_k, lbl, dtype=labels_np.dtype))
+
+        selected_features = np.concatenate(selected_features, axis=0)
+        selected_labels = np.concatenate(selected_labels, axis=0)
+
+        selected_features = torch.from_numpy(selected_features).float().to(device)
+        selected_labels = torch.from_numpy(selected_labels).long().to(device)
+
+        lada_features = selected_features.t()
+        self.curr_lada_features = nn.Parameter(lada_features)
+
+        curr_classifier = F.one_hot(selected_labels, num_classes=num_classes).float()
+        self.curr_classifier = curr_classifier
+
+        N1, D1 = self.joint_classifier.shape if self.joint_classifier.numel() > 0 else (0, 0)
+        N2, D2 = curr_classifier.shape
+        joint_classifier = torch.zeros(N1 + N2, D1 + D2, device=device)
+        if N1 > 0 and D1 > 0:
+            joint_classifier[:N1, :D1] = self.joint_classifier
+        joint_classifier[N1:, D1:] = curr_classifier
+        self.joint_classifier = joint_classifier
+
+        self.num_curr_classes = num_classes
+
+        logging.info(f"LADA built: {selected_features.shape[0]} cluster centers "
+                     f"for {num_classes} classes (k={k})")
+
+    def forward(self, image_features, lada_features=None):
+        """
+        计算 LADA logits
+
+        Args:
+            image_features: (N, D) 归一化后的图像特征
+            lada_features: 可选，覆盖默认的 prev+curr 拼接
+
+        Returns:
+            lada_logits: (N, C_total)
+        """
+        if lada_features is None:
+            if self.curr_lada_features is not None:
+                lada_features = torch.cat([self.prev_lada_features,
+                                           self.curr_lada_features], dim=1)
+            else:
+                lada_features = self.prev_lada_features
+
+        affinity = image_features @ lada_features
+        lada_logits = torch.exp(-self.beta * (1 - affinity)) @ self.joint_classifier
+        return lada_logits
+
+    def finalize_task(self):
+        """
+        任务结束后：
+        1. 将 curr_lada_features 冻结并追加到 prev_lada_features
+        2. curr_lada_features 置空
+        """
+        if self.curr_lada_features is not None:
+            self.prev_lada_features = torch.cat([
+                self.prev_lada_features,
+                self.curr_lada_features.detach()
+            ], dim=1)
+            self.curr_lada_features = None
+            self.curr_classifier = None
+            self.num_prev_classes += self.num_curr_classes
+            self.num_curr_classes = 0
+            logging.info(f"LADA finalized: prev_lada_features shape = {self.prev_lada_features.shape}")
+
+    def get_all_lada_features(self):
+        """返回拼接后的所有 LADA 特征 (D, K_total)"""
+        if self.curr_lada_features is not None:
+            return torch.cat([self.prev_lada_features, self.curr_lada_features], dim=1)
+        return self.prev_lada_features
+
+    def get_total_classes(self):
+        """返回当前覆盖的总类别数"""
+        return self.joint_classifier.shape[1] if self.joint_classifier.numel() > 0 else 0

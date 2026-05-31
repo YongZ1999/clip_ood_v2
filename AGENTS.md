@@ -220,12 +220,11 @@ CLIP 模型在持续学习中的灾难性遗忘。微调会破坏跨模态对齐
 | 1 | **LoRA-NSP**（训练端） | `src/models/lora_sgp.py`, `src/trainers/lora_nsp_trainer.py` | LoRA 更新投影到预训练权重的零空间 + 蒸馏损失 |
 | 2 | **LR-RGDA 集成分类器**（推理端） | `src/classifiers/lr_rgda_classifier.py`, `src/classifiers/gaussian_classifier.py` | 低秩正则化高斯判别分析 + 零样本集成 |
 
-### 实验基线（5种）
+### 实验基线（4种）
 
 | 基线 | 训练 | 分类器 | 对应配置文件 |
 |------|------|--------|-------------|
 | **B0** | 无 | 零样本 | `configs/experiments/incremental_b0_zeroshot.yaml` |
-| **B1** | 无 | LR-RGDA + 零样本集成 | `configs/experiments/incremental_b1_routing.yaml` |
 | **B2** | 标准 LoRA | 零样本 | `configs/experiments/incremental_b2_lora_zs.yaml` |
 | **B3** | LoRA-NSP | 零样本 | `configs/experiments/incremental_b3_lora_nsp_zs.yaml` |
 | **B4** | LoRA-NSP | LR-RGDA + 零样本集成（完整方法） | `configs/experiments/incremental_b4_lora_nsp_full.yaml` |
@@ -255,6 +254,7 @@ CLIP 模型在持续学习中的灾难性遗忘。微调会破坏跨模态对齐
 | Phase 1 实验（推理端） | ✅ 完成 |
 | Phase 3-4 实验（训练端） | ⚠️ ~60%（框架就位，部分未跑完） |
 | 超参数优化 | ✅ ~100% |
+| OOD 检测模块 | ✅ 已删除（`src/detectors/`, `src/routing/`, 相关脚本） |
 | 代码清理 | ⚠️ ~60%（有旧版遗留代码） |
 | 单元测试 | ⚠️ ~20% |
 | 文档 | ✅ ~95%（有 PROJECT_DOCUMENTATION.md + PRESENTATION.md） |
@@ -274,6 +274,7 @@ project_clip_continual_learning/
 │   ├── models/                        # CLIP 封装, LoRA 变体, 蒸馏损失
 │   ├── experiments/                   # 实验入口脚本
 │   └── utils/                         # Config, 指标, 特征提取, 评估
+│   (OOD 检测模块 src/detectors/ 和 src/routing/ 已删除)
 ├── configs/
 │   ├── base/default.yaml              # 基础配置（所有实验继承）
 │   └── experiments/*.yaml             # 实验特定配置
@@ -289,7 +290,7 @@ project_clip_continual_learning/
 | 文件 | 功能 |
 |------|------|
 | `src/experiments/run_continual_learning.py` | 持续学习主实验（B0/B2/B3） |
-| `src/experiments/run_continual_learning_routing.py` | 带集成分类器的持续学习（B1/B4） |
+| `src/experiments/run_continual_learning_routing.py` | 带集成分类器的持续学习（B4） |
 | `src/experiments/run_continual_learning_routing_v2.py` | v2 版本 |
 | `src/experiments/generate_paper_tables.py` | 论文表格生成 |
 

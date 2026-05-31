@@ -25,9 +25,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from transformers import CLIPModel, CLIPProcessor
 from src.classifiers.lr_rgda_classifier import LRRGDAClassifier, EnsembleClassifier
-from src.detectors.ood_detector import ClassifierBasedOODDetector, MahalanobisOODDetector
 from src.classifiers.gaussian_statistics import build_stats_dict_from_features
-from src.routing.adaptive_router import AdaptiveRouter
 from utils_data import get_xtail_trainloader, get_xtail_testloader, get_transforms
 
 
@@ -45,19 +43,12 @@ def parse_args():
     
     # 评估策略
     parser.add_argument("--strategy", type=str, required=True,
-                       choices=["zeroshot", "lrrgda", "ensemble", "routing"],
+                       choices=["zeroshot", "lrrgda", "ensemble"],
                        help="Evaluation strategy")
     
     # 固定集成参数
     parser.add_argument("--alpha", type=float, default=0.8,
-                       help="Ensemble alpha (for ensemble and routing strategies)")
-    
-    # 自适应路由参数
-    parser.add_argument("--ood_threshold", type=float, default=0.85,
-                       help="OOD threshold for routing (from Table 3)")
-    parser.add_argument("--ood_detector_type", type=str, default="lr_rgda",
-                       choices=["mahalanobis", "lda", "qda", "lr_rgda"],
-                       help="OOD detector type for routing")
+                       help="Ensemble alpha")
     
     # 模型配置
     parser.add_argument("--model_name", type=str,
@@ -129,10 +120,8 @@ def evaluate_classification(args):
     print(f"ID datasets: {args.id_datasets}")
     print(f"OOD datasets: {args.ood_datasets}")
     print(f"Strategy: {args.strategy}")
-    if args.strategy in ["ensemble", "routing"]:
+    if args.strategy == "ensemble":
         print(f"Alpha: {args.alpha}")
-    if args.strategy == "routing":
-        print(f"OOD threshold: {args.ood_threshold}")
     print("="*80)
     
     # 设置随机种子
@@ -208,8 +197,8 @@ def evaluate_classification(args):
         )
         router = None
         
-    elif args.strategy in ["ensemble", "routing"]:
-        # 固定集成或自适应路由
+    elif args.strategy == "ensemble":
+        # 集成分类器
         # 提取ID训练特征
         id_train_features = []
         id_train_labels = []
@@ -238,34 +227,9 @@ def evaluate_classification(args):
             qda_reg_alpha1=0.6, qda_reg_alpha2=1.0, qda_reg_alpha3=0.5, temperature=1.0
         )
         
-        # 集成分类器
-        ensemble = EnsembleClassifier(
+        classifier = EnsembleClassifier(
             zeroshot_classifier, lrrgda_classifier, alpha=args.alpha, temperature=1.0
         )
-        
-        if args.strategy == "ensemble":
-            # 固定集成
-            classifier = ensemble
-            router = None
-        else:
-            # 自适应路由
-            # 构建OOD检测器
-            if args.ood_detector_type == "mahalanobis":
-                ood_detector = MahalanobisOODDetector.from_stats_dict(
-                    stats_dict=stats_dict, alpha=0.2, device=args.device
-                )
-            else:
-                ood_detector = ClassifierBasedOODDetector(
-                    stats_dict=stats_dict, classifier_type=args.ood_detector_type,
-                    device=args.device, rank=32,
-                    qda_reg_alpha1=0.6, qda_reg_alpha2=1.0, qda_reg_alpha3=0.5
-                )
-            
-            router = AdaptiveRouter(
-                zeroshot_classifier, ensemble, ood_detector,
-                threshold=args.ood_threshold
-            )
-            classifier = None
     
     # 评估所有数据集
     print(f"\n[3/3] Evaluating all datasets...")
@@ -285,11 +249,8 @@ def evaluate_classification(args):
         
         features, labels = extract_features(model, test_loader, args.device)
         
-        if router is not None:
-            predictions, _ = router.predict(features.to(args.device), model.logit_scale.exp())
-        else:
-            logits = classifier.forward(features.to(args.device))
-            predictions = logits.argmax(dim=1)
+        logits = classifier.forward(features.to(args.device))
+        predictions = logits.argmax(dim=1)
         
         correct = (predictions.cpu() == labels).sum().item()
         total = len(labels)
@@ -310,11 +271,8 @@ def evaluate_classification(args):
         
         features, labels = extract_features(model, test_loader, args.device)
         
-        if router is not None:
-            predictions, _ = router.predict(features.to(args.device), model.logit_scale.exp())
-        else:
-            logits = classifier.forward(features.to(args.device))
-            predictions = logits.argmax(dim=1)
+        logits = classifier.forward(features.to(args.device))
+        predictions = logits.argmax(dim=1)
         
         correct = (predictions.cpu() == labels).sum().item()
         total = len(labels)
@@ -351,8 +309,7 @@ def evaluate_classification(args):
         'experiment': {
             'table': 'Table 4/5',
             'strategy': args.strategy,
-            'alpha': args.alpha if args.strategy in ['ensemble', 'routing'] else None,
-            'ood_threshold': args.ood_threshold if args.strategy == 'routing' else None,
+            'alpha': args.alpha if args.strategy == 'ensemble' else None,
         },
         'configuration': {
             'id_datasets': args.id_datasets,

@@ -17,10 +17,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from transformers import CLIPModel, CLIPProcessor
 from src.classifiers.lr_rgda_classifier import LRRGDAClassifier, EnsembleClassifier
-from src.detectors.ood_detector import ClassifierBasedOODDetector, MahalanobisOODDetector
 from src.classifiers.gaussian_statistics import build_stats_dict_from_features
-from src.routing.adaptive_router import AdaptiveRouter
-from src.utils.evaluation import calculate_ood_metrics, calculate_classification_accuracy
+from src.utils.evaluation import calculate_classification_accuracy
 
 
 def convert_to_native(obj):
@@ -74,16 +72,7 @@ def parse_args():
     parser.add_argument("--temperature", type=float, default=1.0,
                        help="Temperature for zero-shot classifier")
     
-    # OOD检测器配置
-    parser.add_argument("--ood_detector_type", type=str, default="lr_rgda",
-                       choices=["mahalanobis", "lda", "qda", "lr_rgda"],
-                       help="OOD detector type")
-    parser.add_argument("--ood_threshold", type=float, default=0.993,
-                       help="OOD detection threshold for routing")
-    parser.add_argument("--enable_routing", action="store_true",
-                       help="Enable adaptive routing")
-    parser.add_argument("--mahalanobis_alpha", type=float, default=0.2,
-                       help="Alpha for Mahalanobis detector")
+
     
     # 输出配置
     parser.add_argument("--output_dir", type=str, required=True,
@@ -135,7 +124,7 @@ def evaluate_with_cached_features(args):
     print(f"ID datasets: {args.id_datasets}")
     print(f"OOD datasets: {args.ood_datasets}")
     print(f"Classifier type: {args.classifier_type or 'adaptive_routing'}")
-    print(f"OOD detector: {args.ood_detector_type}")
+
     print(f"Cache directory: {args.cache_dir}")
     print("="*80)
     
@@ -224,18 +213,6 @@ def evaluate_with_cached_features(args):
         results['id_accuracy'] = id_acc
         results['ood_accuracy'] = ood_acc
         
-    elif args.enable_routing:
-        # 使用自适应路由
-        print(f"\nEvaluating with Adaptive Routing (detector={args.ood_detector_type})...")
-        id_acc, ood_acc, ood_metrics = evaluate_with_routing(
-            args, model, processor, zeroshot_classifier, stats_dict, all_class_names
-        )
-        results['classifier_type'] = 'adaptive_routing'
-        results['ood_detector_type'] = args.ood_detector_type
-        results['ood_threshold'] = args.ood_threshold
-        results['id_accuracy'] = id_acc
-        results['ood_accuracy'] = ood_acc
-        results['ood_metrics'] = ood_metrics
     else:
         print("\nWarning: No classifier type specified. Use --classifier_type or --enable_routing")
         return
@@ -255,9 +232,6 @@ def evaluate_with_cached_features(args):
     print(f"ID Accuracy:  {results['id_accuracy']:.4f}")
     print(f"OOD Accuracy: {results['ood_accuracy']:.4f}")
     print(f"Combined Score: {results['combined_score']:.4f}")
-    if 'ood_metrics' in results:
-        print(f"AUROC: {results['ood_metrics']['auroc']:.4f}")
-        print(f"FPR@95TPR: {results['ood_metrics']['fpr_at_95_tpr']:.4f}")
     print("="*80)
     print(f"Results saved to: {output_file}")
 
@@ -409,135 +383,7 @@ def evaluate_ensemble(args, model, zeroshot_classifier, stats_dict, class_names)
     return id_acc, ood_acc
 
 
-def evaluate_with_routing(args, model, processor, zeroshot_classifier, stats_dict, class_names):
-    """使用自适应路由评估"""
-    
-    # 构建LR-RGDA分类器
-    lr_rgda_classifier = LRRGDAClassifier(
-        stats_dict=stats_dict,
-        device=args.device,
-        rank=32,
-        qda_reg_alpha1=0.6,
-        qda_reg_alpha2=1.0,
-        qda_reg_alpha3=0.5,
-        temperature=1.0
-    )
-    
-    # 计算ID类别数量
-    num_id_classes = len(stats_dict)
-    
-    # 构建集成分类器（传入num_id_classes以正确处理ID/OOD类别）
-    ensemble = EnsembleClassifier(
-        zeroshot_classifier,
-        lr_rgda_classifier,
-        alpha=args.alpha,
-        temperature=args.temperature,
-        num_id_classes=num_id_classes
-    )
-    
-    # 构建OOD检测器
-    if args.ood_detector_type == "mahalanobis":
-        ood_detector = MahalanobisOODDetector.from_stats_dict(
-            stats_dict=stats_dict,
-            alpha=args.mahalanobis_alpha,
-            device=args.device
-        )
-    else:
-        ood_detector = ClassifierBasedOODDetector(
-            stats_dict=stats_dict,
-            classifier_type=args.ood_detector_type,
-            device=args.device,
-            rank=32,
-            qda_reg_alpha1=0.6,
-            qda_reg_alpha2=1.0,
-            qda_reg_alpha3=0.5
-        )
-    
-    # 构建自适应路由器
-    router = AdaptiveRouter(
-        zeroshot_classifier,
-        ensemble,
-        ood_detector,
-        threshold=args.ood_threshold
-    )
-    
-    # 评估ID数据集 - 应用label_offset
-    id_correct = 0
-    id_total = 0
-    label_offset = 0
-    
-    for dataset_name in args.id_datasets:
-        cache_data = load_cached_features(args.cache_dir, dataset_name)
-        test_features = cache_data['test_features'].to(args.device)
-        test_labels = cache_data['test_labels'] + label_offset
-        
-        predictions, is_ood = router.predict(test_features, model.logit_scale.exp())
-        id_correct += (predictions.cpu() == test_labels).sum().item()
-        id_total += len(test_labels)
-        
-        label_offset += len(cache_data['class_names'])
-    
-    id_acc = id_correct / id_total if id_total > 0 else 0
-    
-    # 评估OOD数据集（使用路由分类器计算分类准确率）- 应用label_offset
-    ood_correct = 0
-    ood_total = 0
-    
-    # 计算OOD label offset
-    ood_label_offset = 0
-    for id_ds in args.id_datasets:
-        id_cache = load_cached_features(args.cache_dir, id_ds)
-        ood_label_offset += len(id_cache['class_names'])
-    
-    for dataset_name in args.ood_datasets:
-        try:
-            cache_data = load_cached_features(args.cache_dir, dataset_name)
-            test_features = cache_data['test_features'].to(args.device)
-            
-            # 计算该OOD数据集在全局类别中的offset
-            current_ood_offset = ood_label_offset
-            for ood_ds in args.ood_datasets:
-                if ood_ds == dataset_name:
-                    break
-                ood_cache = load_cached_features(args.cache_dir, ood_ds)
-                current_ood_offset += len(ood_cache['class_names'])
-            test_labels = cache_data['test_labels'] + current_ood_offset
-            
-            # 使用路由分类器（自动为OOD样本选择零样本分类器）
-            predictions, is_ood = router.predict(test_features, model.logit_scale.exp())
-            ood_correct += (predictions.cpu() == test_labels).sum().item()
-            ood_total += len(test_labels)
-        except FileNotFoundError:
-            continue
-    
-    ood_acc = ood_correct / ood_total if ood_total > 0 else 0
-    
-    # 收集OOD分数用于OOD检测指标评估
-    ood_scores_list = []
-    id_scores_list = []
-    
-    for dataset_name in args.ood_datasets:
-        try:
-            cache_data = load_cached_features(args.cache_dir, dataset_name)
-            test_features = cache_data['test_features'].to(args.device)
-            
-            ood_score = ood_detector.predict_score(test_features)
-            ood_scores_list.extend(ood_score.cpu().numpy())
-        except FileNotFoundError:
-            continue
-    
-    # 收集ID分数用于OOD检测评估
-    for dataset_name in args.id_datasets:
-        cache_data = load_cached_features(args.cache_dir, dataset_name)
-        test_features = cache_data['test_features'].to(args.device)
-        
-        id_score = ood_detector.predict_score(test_features)
-        id_scores_list.extend(id_score.cpu().numpy())
-    
-    # 计算OOD检测指标
-    ood_metrics = calculate_ood_metrics(id_scores_list, ood_scores_list)
-    
-    return id_acc, ood_acc, ood_metrics
+
 
 
 if __name__ == "__main__":

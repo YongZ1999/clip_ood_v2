@@ -114,10 +114,10 @@ def parse_args():
                         help="Number of workers for data loading.")
 
     # 损失函数权重参数
-    parser.add_argument("--fd_weight", type=float, default=1.0,
-                        help="Weight for feature distillation loss.")
-    parser.add_argument("--cd_weight", type=float, default=1.0,
-                        help="Weight for cross-modal distillation loss.")
+    parser.add_argument("--fd_weight", type=float, default=0.0,
+                        help="Weight for feature distillation loss (0=disabled).")
+    parser.add_argument("--cd_weight", type=float, default=0.0,
+                        help="Weight for cross-modal distillation loss (0=disabled).")
     parser.add_argument("--aux_weight", type=float, default=1.0,
                         help="Weight for auxiliary linear classifier loss (0=disabled). "
                              "Adds a linear head on features during training to improve "
@@ -150,6 +150,8 @@ def parse_args():
                         help="是否同时微调文本编码器（默认 True）。设为 False 则仅微调图像编码器。")
     parser.add_argument("--text_lora_rank", type=int, default=4,
                         help="文本编码器 LoRA rank（默认 4，与 image lora_rank 一致）。")
+    parser.add_argument("--tune_vision_encoder", type=lambda x: x.lower() == 'true', default=True,
+                        help="是否微调视觉编码器（默认 True）。设为 False 则仅微调文本编码器（text-only模式）。")
 
     args = parser.parse_args()
     # 将 dataset_sequence 转换为嵌套列表格式 [[d1], [d2], ...]
@@ -172,8 +174,9 @@ def main(args):
     model = trainer.model
     processor = trainer.processor
 
+    use_distillation = args.fd_weight > 0 or args.cd_weight > 0
     reference_loader = load_reference_dataset(args, trainer.model_pretrain,
-                                              processor, args.device)
+                                              processor, args.device) if use_distillation else None
 
     # 预收集所有数据集的类名，用于全局 ZS 分类器（text LoRA 每次 merge 后更新）
     global_class_names = []
@@ -239,21 +242,24 @@ def main(args):
         if args.init_mode == "lora_nsp":
             print("\n=== Applying Null-Space Projection (NSP) ===")
             # 图像编码器 NSP
-            covariances = trainer.extract_layer_covariances(cov_loader)
+            if trainer.has_vision_lora:
+                covariances = trainer.extract_layer_covariances(cov_loader)
             # 文本编码器 NSP
             if trainer.has_text_lora:
                 text_covariances = trainer.extract_text_covariances(task_class_names)
             trainer.finalize_task_for_incremental()
-            trainer.update_covariance_history(covariances)
+            if trainer.has_vision_lora:
+                trainer.update_covariance_history(covariances)
             if trainer.has_text_lora:
                 trainer.update_text_covariance_history(text_covariances)
             # 重算全局 ZS 分类器（文本编码器已更新）
             global_zs_classifier = get_zeroshot_classifier(model, processor, global_class_names, args.device)
         elif "proj_sigma" in args.init_mode:
             print("\n=== Proj-Σ: Extracting covariances + merging ===")
-            covariances = trainer.extract_layer_covariances(cov_loader)
+            if trainer.has_vision_lora:
+                covariances = trainer.extract_layer_covariances(cov_loader)
+                trainer.update_covariance_history(covariances, update_projection=False)
             trainer.finalize_task_for_incremental()
-            trainer.update_covariance_history(covariances, update_projection=False)
         else:
             print(f"\n=== Merging LoRA Weights (init_mode={args.init_mode}) ===")
             trainer.finalize_task_for_incremental()

@@ -43,13 +43,13 @@ def get_clip_model(args, train_mode="lora"):
         
         elif lora_type == 'lora_nsp':
             use_soft_projection = False
-            model.vision_model = LoRACLIPVisionTransformer(
-                model.vision_model,
-                r=rank,
-                use_soft_projection=use_soft_projection,
-                nsp_eps=getattr(args, 'nsp_eps', 0.05),
-                nsp_weight=getattr(args, 'nsp_weight', 0.02))
-            # 同时给文本编码器添加 LoRA + NSP
+            if getattr(args, 'tune_vision_encoder', True):
+                model.vision_model = LoRACLIPVisionTransformer(
+                    model.vision_model,
+                    r=rank,
+                    use_soft_projection=use_soft_projection,
+                    nsp_eps=getattr(args, 'nsp_eps', 0.05),
+                    nsp_weight=getattr(args, 'nsp_weight', 0.02))
             if getattr(args, 'tune_text_encoder', True):
                 model.text_model = LoRACLIPTextTransformer(
                     model.text_model,
@@ -60,13 +60,14 @@ def get_clip_model(args, train_mode="lora"):
 
         elif lora_type == "lora_sgp":
             use_soft_projection = True
-            model.vision_model = LoRACLIPVisionTransformer(
-                model.vision_model,
-                r=rank,
-                weight_temp=getattr(args, 'weight_temp', 1.0),
-                use_soft_projection=use_soft_projection,
-                weight_kind=getattr(args, 'weight_kind', 'log1p'),
-                weight_p=getattr(args, 'weight_p', 1.0))
+            if getattr(args, 'tune_vision_encoder', True):
+                model.vision_model = LoRACLIPVisionTransformer(
+                    model.vision_model,
+                    r=rank,
+                    weight_temp=getattr(args, 'weight_temp', 1.0),
+                    use_soft_projection=use_soft_projection,
+                    weight_kind=getattr(args, 'weight_kind', 'log1p'),
+                    weight_p=getattr(args, 'weight_p', 1.0))
             if getattr(args, 'tune_text_encoder', True):
                 model.text_model = LoRACLIPTextTransformer(
                     model.text_model,

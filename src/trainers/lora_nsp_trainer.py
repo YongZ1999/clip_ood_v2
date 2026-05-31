@@ -51,7 +51,8 @@ class LoRANSPTrainer:
         self.model, self.processor = get_clip_model(args, train_mode='lora')
         self.model.to(self.device)
 
-        # 检查是否启用了文本编码器 LoRA
+        # 检查是否启用了视觉/文本编码器 LoRA
+        self.has_vision_lora = hasattr(self.model.vision_model, 'lora_modules')
         self.has_text_lora = hasattr(self.model.text_model, 'lora_modules')
 
         # 预训练模型（用于蒸馏）
@@ -66,7 +67,7 @@ class LoRANSPTrainer:
         self.text_covariance_counts: Dict[str, int] = {}
 
         # 加载图像协方差历史
-        if self.covariance_history:
+        if self.covariance_history and self.has_vision_lora:
             logging.info(f"Loading image covariance history with {len(self.covariance_history)} layers")
             self.model.vision_model.update_projection_matrices(self.covariance_history)
         # 加载文本协方差历史
@@ -77,7 +78,15 @@ class LoRANSPTrainer:
     def encode_text(self, text):
         text_inputs = self.processor(text=text, return_tensors="pt", padding=True, truncation=True)
         text_inputs = {k: v.to(self.device) for k, v in text_inputs.items()}
-        return self.model.get_text_features(**text_inputs)
+        text_outputs = self.model.text_model(**text_inputs)
+        if hasattr(text_outputs, 'pooler_output') and text_outputs.pooler_output is not None:
+            pooled = text_outputs.pooler_output
+        elif hasattr(text_outputs, 'last_hidden_state'):
+            pooled = text_outputs.last_hidden_state[:, -1, :]
+        else:
+            pooled = text_outputs[1] if isinstance(text_outputs, tuple) else text_outputs
+        text_features = self.model.text_projection(pooled)
+        return text_features
 
     def encode_image(self, img):
         return self.model.get_image_features(img)
@@ -248,20 +257,21 @@ class LoRANSPTrainer:
         logging.info("=== Finalizing Task for Incremental Learning ===")
 
         # 图像编码器 merge + reset
-        if hasattr(self.model.vision_model, 'merge_and_reset_for_incremental'):
-            self.model.vision_model.merge_and_reset_for_incremental()
-        else:
-            for name, module in self.model.vision_model.lora_modules.items():
-                if hasattr(module, 'merge_lora_weights'):
-                    module.merge_lora_weights()
-                elif hasattr(module, 'merge_and_reinit'):
-                    module.merge_and_reinit()
-                elif hasattr(module, 'merge_and_reset'):
-                    module.merge_and_reset()
-                elif hasattr(module, 'merge'):
-                    module.merge()
-                else:
-                    raise AttributeError(f"Image LoRA module {name} lacks a merge/reset method.")
+        if self.has_vision_lora:
+            if hasattr(self.model.vision_model, 'merge_and_reset_for_incremental'):
+                self.model.vision_model.merge_and_reset_for_incremental()
+            else:
+                for name, module in self.model.vision_model.lora_modules.items():
+                    if hasattr(module, 'merge_lora_weights'):
+                        module.merge_lora_weights()
+                    elif hasattr(module, 'merge_and_reinit'):
+                        module.merge_and_reinit()
+                    elif hasattr(module, 'merge_and_reset'):
+                        module.merge_and_reset()
+                    elif hasattr(module, 'merge'):
+                        module.merge()
+                    else:
+                        raise AttributeError(f"Image LoRA module {name} lacks a merge/reset method.")
 
         # 文本编码器 merge + reset
         if self.has_text_lora:
@@ -277,7 +287,7 @@ class LoRANSPTrainer:
                 else:
                     raise AttributeError(f"Text LoRA module {name} lacks a merge/reset method.")
 
-        logging.info("Task finalized: LoRA weights merged and reset for both encoders.")
+        logging.info("Task finalized: LoRA weights merged and reset for enabled encoders.")
 
     def train(self, train_loader, class_names, reference_loader,
               eval_interval=0, eval_callback=None, aux_weight=0.0):
@@ -301,7 +311,9 @@ class LoRANSPTrainer:
             precomputed_classifier = self.zeroshot_classifier(class_names, templates)
 
         # 优化器：图像 + 文本 LoRA 参数
-        trainable_params = list(self.model.vision_model.get_params())
+        trainable_params = []
+        if self.has_vision_lora:
+            trainable_params += list(self.model.vision_model.get_params())
         if self.has_text_lora:
             trainable_params += list(self.model.text_model.get_params())
 
@@ -341,9 +353,11 @@ class LoRANSPTrainer:
             labels = labels.to(self.device)
 
             # --- 前向传播 ---
-            vision_outputs = self.model.vision_model(images)
-            pooled = vision_outputs[1]
-            proj_feats = self.model.visual_projection(pooled)
+            vision_ctx = torch.no_grad() if not self.has_vision_lora else torch.enable_grad()
+            with vision_ctx:
+                vision_outputs = self.model.vision_model(images)
+                pooled = vision_outputs[1]
+                proj_feats = self.model.visual_projection(pooled)
             norm_feats = proj_feats / proj_feats.norm(dim=-1, keepdim=True)
 
             # --- ZS 分类器 ---
@@ -415,8 +429,10 @@ class LoRANSPTrainer:
                 t_img_f = t_img_f.to(self.device)
                 t_txt_f = t_txt_f.to(self.device)
 
-                r_vision = self.model.vision_model(r_imgs)
-                s_img_f = self.model.visual_projection(r_vision[1])
+                vision_ctx_ref = torch.no_grad() if not self.has_vision_lora else torch.enable_grad()
+                with vision_ctx_ref:
+                    r_vision = self.model.vision_model(r_imgs)
+                    s_img_f = self.model.visual_projection(r_vision[1])
                 s_img_f = s_img_f / s_img_f.norm(dim=-1, keepdim=True)
 
                 l_fd = feature_distillation_loss(t_img_f, s_img_f)
