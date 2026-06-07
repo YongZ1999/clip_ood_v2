@@ -35,7 +35,7 @@ from src.utils.main_utils import (
     get_full_stats,
     print_paper_metrics,
 )
-from utils_data import get_xtail_trainloader, get_transforms
+from utils_data import get_xtail_trainloader, get_xtail_classnames, get_transforms
 
 
 def parse_args():
@@ -179,15 +179,11 @@ def main(args):
                                               processor, args.device) if use_distillation else None
 
     # 预收集所有数据集的类名，用于全局 ZS 分类器（text LoRA 每次 merge 后更新）
-    global_class_names = []
-    for task_datasets in args.dataset_sequence:
-        for d_name in task_datasets:
-            _, _, _, c_names = get_xtail_trainloader(
-                root=args.root, dataset_name=d_name,
-                transform_train=None, transform_test=None,
-                num_shots=args.num_shots, batch_size=args.batch_size
-            )
-            global_class_names.extend(c_names)
+global_class_names = []
+for task_datasets in args.dataset_sequence:
+    for d_name in task_datasets:
+        c_names = get_xtail_classnames(args.root, d_name, args.num_shots)
+        global_class_names.extend(c_names)
 
     # ========== 2. 增量学习循环 ==========
     history_class_names = []  # 记录所有已学类名列表的列表
@@ -328,7 +324,7 @@ def main(args):
             eval_datasets = args.dataset_sequence[j]
             d_name = eval_datasets[0]  # 每个 Task 只有一个数据集
 
-            zs_acc, rgda_acc, ens_acc, c_len, _ = evaluate_dataset(
+            zs_acc, rgda_acc, ens_acc, lada_acc, lada_zs_acc, c_len, _ = evaluate_dataset(
                 args, d_name, model, zeroshot_classifier, lr_rgda_classifier,
                 current_num_classes, eval_label_offset
             )

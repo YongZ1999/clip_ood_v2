@@ -26,6 +26,7 @@ from torch.utils.data import DataLoader, ConcatDataset, WeightedRandomSampler
 from src.trainers.lora_nsp_trainer import LoRANSPTrainer
 from src.classifiers.lr_rgda_classifier import LRRGDAClassifier
 from src.classifiers.gaussian_statistics import build_multi_center_stats_dict
+from src.lada import LADAClassifier
 from src.utils.reference_loader import load_reference_dataset
 
 from src.utils.main_utils import (
@@ -34,7 +35,7 @@ from src.utils.main_utils import (
     evaluate_dataset,
     batch_evaluate_datasets,
 )
-from utils_data import get_xtail_trainloader, get_transforms
+from utils_data import get_xtail_trainloader, get_xtail_classnames, get_transforms
 
 
 # X-TAIL 全部 10 个数据集（LADA 论文协议）
@@ -150,6 +151,47 @@ def parse_args():
                         help="Number of centers per class for multi-center LR-RGDA.\n"
                              "1=standard single-center, >1=k-means multi-center.")
 
+    # LADA 分类器参数
+    parser.add_argument("--enable_lada", action='store_true', default=False,
+                        help="是否启用 LADA 分类器，与 LR-RGDA 同时评估对比。")
+    parser.add_argument("--lada_k", type=int, default=16,
+                        help="LADA 每类聚类中心数 k（默认 16）。")
+    parser.add_argument("--lada_beta", type=float, default=1.0,
+                        help="LADA 指数亲和变换的 β 参数（默认 1.0）。")
+    parser.add_argument("--lada_alpha", type=float, default=1.0,
+                        help="LADA+ZS 集成中 LADA logits 的权重（默认 1.0）。")
+    parser.add_argument("--lada_train_iter", type=int, default=0,
+                        help="LADA 分类器梯度微调迭代次数（默认 0，不禁用）。")
+    parser.add_argument("--lada_train_lr", type=float, default=0.01,
+                        help="LADA 分类器梯度微调学习率（默认 0.01）。")
+
+    # LR-RGDA 微调参数
+    parser.add_argument("--rgda_train_iter", type=int, default=0,
+                        help="LR-RGDA 分类器梯度微调迭代次数（默认 0，不禁用）。")
+    parser.add_argument("--rgda_train_lr", type=float, default=0.01,
+                        help="LR-RGDA 分类器梯度微调学习率（默认 0.01）。")
+
+    # 高斯特征采样
+    parser.add_argument("--use_gaussian_features", action='store_true', default=False,
+                        help="用高斯分布采样伪特征替代真实特征来训练分类器。")
+    parser.add_argument("--gaussian_samples_per_class", type=int, default=16,
+                        help="每类高斯采样数（默认 16）。")
+    parser.add_argument("--gmm_k", type=int, default=0,
+                        help="每类 spherical GMM 分量数（默认 0，使用正则化高斯；>0 启用 GMM 采样）。")
+    parser.add_argument("--gmm_reg", type=float, default=0.0,
+                        help="GMM spherical 协方差正则化（加到标量方差上，默认 0.0）。")
+    parser.add_argument("--gmm_cov_type", type=str, default="spherical",
+                        choices=["spherical", "rank1"],
+                        help="GMM 协方差类型（spherical=标量, rank1=球面基+秩1主成分）。")
+
+    # 高斯采样正则化参数（独立于分类器构建参数）
+    parser.add_argument("--sample_alpha1", type=float, default=None,
+                        help="采样正则化 α1，默认沿用 rgda_alpha1。")
+    parser.add_argument("--sample_alpha2", type=float, default=None,
+                        help="采样正则化 α2，默认沿用 rgda_alpha2。")
+    parser.add_argument("--sample_alpha3", type=float, default=None,
+                        help="采样正则化 α3，默认沿用 rgda_alpha3。")
+
     # 文本编码器 LoRA 参数（联合训练默认关闭，1100 类全量编码显存不足）
     parser.add_argument("--tune_text_encoder", type=lambda x: x.lower() == 'true', default=False,
                         help="是否同时微调文本编码器（默认 False）。联合训练类多，显存压力大。")
@@ -193,6 +235,7 @@ def main(args):
     def run_full_evaluation(eval_model, tag=""):
         logging.info(f"\n=== Extracting Features for LR-RGDA {tag}===")
         all_feats = []
+        all_raw_feats = []
         all_lbls = []
         feat_offset = 0
 
@@ -205,27 +248,41 @@ def main(args):
             )
             from src.utils.feature_extractor import extract_features
             features, labels = extract_features(eval_model, tr_loader, args.device)
+            all_raw_feats.append(features.clone())  # 未归一化
             features = features / features.norm(dim=-1, keepdim=True)
             all_feats.append(features)
             all_lbls.append(labels + feat_offset)
             feat_offset += len(c_names)
 
         all_features = torch.cat(all_feats)
+        all_raw_features = torch.cat(all_raw_feats)  # 用于 GMM 拟合
         all_labels = torch.cat(all_lbls)
 
         stats_dict, center_means = build_multi_center_stats_dict(
             all_features, all_labels, M=args.num_centers
         )
 
+        # 原始空间 stats_dict（用于高斯采样，协方差有意义的量级）
+        raw_stats_dict, _ = build_multi_center_stats_dict(
+            all_raw_features, all_labels, M=1
+        )
+
+        # 原始空间全局协方差
+        feat_offset = 0
+        raw_per_dataset_covs = []
+        for d_name in args.id_datasets:
+            c_names = get_xtail_classnames(args.root, d_name, args.num_shots)
+            n_classes = len(c_names)
+            ds_cov = sum(raw_stats_dict[cid].cov for cid in range(feat_offset, feat_offset + n_classes)) / n_classes
+            raw_per_dataset_covs.append(ds_cov)
+            feat_offset += n_classes
+        raw_global_cov = sum(raw_per_dataset_covs) / len(raw_per_dataset_covs)
+
         # 计算数据集等权的全局协方差（避免类别多的数据集主导 Σ_global）
         feat_offset = 0
         per_dataset_covs = []
         for d_name in args.id_datasets:
-            _, _, _, c_names = get_xtail_trainloader(
-                root=args.root, dataset_name=d_name,
-                transform_train=None, transform_test=None,
-                num_shots=args.num_shots, batch_size=args.batch_size
-            )
+            c_names = get_xtail_classnames(args.root, d_name, args.num_shots)
             n_classes = len(c_names)
             ds_cov = sum(stats_dict[cid].cov for cid in range(feat_offset, feat_offset + n_classes)) / n_classes
             per_dataset_covs.append(ds_cov)
@@ -246,55 +303,202 @@ def main(args):
             global_cov=dataset_balanced_global_cov,
         )
 
+        # 可选：用高斯分布采样伪特征替代真实特征
+        if args.use_gaussian_features:
+            if args.gmm_k > 0:
+                # ---- Spherical GMM 模式 ----
+                logging.info(f"Sampling ~{args.gaussian_samples_per_class} features per class "
+                             f"from spherical GMM (k={args.gmm_k})")
+                from sklearn.mixture import GaussianMixture
+                import numpy as np
+                all_raw_features_np = all_raw_features.cpu().numpy()
+                all_labels_np = all_labels.cpu().numpy()
+                syn_feats = []
+                syn_labels = []
+
+                for cid in sorted(stats_dict.keys()):
+                    mask = all_labels_np == cid
+                    feats_c = all_raw_features_np[mask]  # 原始空间拟合 GMM
+
+                    if len(feats_c) < args.gmm_k:
+                        # 样本太少，直接复制或降 k
+                        actual_k = max(1, len(feats_c))
+                    else:
+                        actual_k = args.gmm_k
+
+                    gmm = GaussianMixture(n_components=actual_k, covariance_type='spherical',
+                                          random_state=42, reg_covar=1e-6)
+                    gmm.fit(feats_c)
+
+                    # 按权重比例分配每分量采样数
+                    total = args.gaussian_samples_per_class
+                    n_per_comp = np.maximum(1, (gmm.weights_ * total).round().astype(int))
+                    diff = total - n_per_comp.sum()
+                    n_per_comp[np.argmax(gmm.weights_)] += diff
+
+                    if args.gmm_cov_type == 'rank1':
+                        # 球形基 + rank-1 主成分: σ²_base·I + λ·vvᵀ
+                        # 采样 = μ + σ_base·ε + √λ·v·η
+                        hard_labels = gmm.predict(feats_c)
+                        sigma_base = np.sqrt(np.mean(gmm.covariances_))  # 球形基标准差
+                        for comp in range(actual_k):
+                            mean = torch.from_numpy(gmm.means_[comp]).float()
+                            n = max(1, int(n_per_comp[comp]))
+                            comp_mask = hard_labels == comp
+                            n_points = comp_mask.sum()
+                            # 球形基噪声
+                            iso_noise = torch.randn(n, mean.shape[0]) * sigma_base
+                            # rank-1 主成分
+                            if n_points >= 2:
+                                centered = feats_c[comp_mask] - gmm.means_[comp]
+                                _, S, Vt = np.linalg.svd(centered, full_matrices=False)
+                                direction = torch.from_numpy(Vt[0]).float()
+                                var_pc1 = (S[0] ** 2) / n_points
+                                pc1_noise = torch.randn(n, 1) * np.sqrt(max(var_pc1, 1e-8)) * direction.unsqueeze(0)
+                            else:
+                                pc1_noise = torch.zeros(n, mean.shape[0])
+                            samples = mean.unsqueeze(0) + iso_noise + pc1_noise
+                            samples = samples / samples.norm(dim=-1, keepdim=True)
+                            syn_feats.append(samples.to(args.device))
+                            syn_labels.append(torch.full((samples.shape[0],), cid, device=args.device))
+                    else:
+                        # spherical 模式
+                        for comp in range(actual_k):
+                            mean = torch.from_numpy(gmm.means_[comp]).float()
+                            var = gmm.covariances_[comp] + args.gmm_reg
+                            n = max(1, int(n_per_comp[comp]))
+                            noise = torch.randn(n, mean.shape[0]) * np.sqrt(max(var, 1e-8))
+                            samples = mean.unsqueeze(0) + noise
+                            samples = samples / samples.norm(dim=-1, keepdim=True)
+                            syn_feats.append(samples.to(args.device))
+                            syn_labels.append(torch.full((samples.shape[0],), cid, device=args.device))
+
+                syn_features = torch.cat(syn_feats)
+                syn_labels_t = torch.cat(syn_labels)
+                logging.info(f"Generated {syn_features.shape[0]} features via {args.gmm_cov_type} GMM (k={args.gmm_k})")
+            else:
+                # ---- 正则化高斯模式（原始空间估计 + 正则化 + 归一化）----
+                sa1 = args.sample_alpha1 if args.sample_alpha1 is not None else args.rgda_alpha1
+                sa2 = args.sample_alpha2 if args.sample_alpha2 is not None else args.rgda_alpha2
+                sa3 = args.sample_alpha3 if args.sample_alpha3 is not None else args.rgda_alpha3
+                logging.info(f"Sampling {args.gaussian_samples_per_class} synthetic features "
+                             f"per class from full Gaussian (α1={sa1}, α2={sa2}, α3={sa3}) "
+                             f"[raw feature space → regularize → sample → L2 normalize]")
+                identity = torch.eye(raw_global_cov.shape[0], device=args.device)
+                raw_global_cov_device = raw_global_cov.to(args.device)
+                syn_feats = []
+                syn_labels = []
+                from src.classifiers.gaussian_statistics import GaussianStatistics
+
+                for cid in sorted(raw_stats_dict.keys()):
+                    raw_cov = raw_stats_dict[cid].cov.to(args.device)
+                    mean = raw_stats_dict[cid].mean.to(args.device)
+
+                    reg_cov = (sa1 * raw_cov +
+                               sa2 * raw_global_cov_device +
+                               sa3 * identity)
+                    reg_cov = 0.5 * (reg_cov + reg_cov.T)
+
+                    reg_stats = GaussianStatistics(mean, reg_cov, reg=1e-4, cholesky=True)
+                    samples = reg_stats.sample(n_samples=args.gaussian_samples_per_class)
+                    samples = samples / samples.norm(dim=-1, keepdim=True)  # 采样后 L2 归一化
+                    syn_feats.append(samples)
+                    syn_labels.append(torch.full((args.gaussian_samples_per_class,), cid, device=args.device))
+                syn_features = torch.cat(syn_feats)
+                syn_labels_t = torch.cat(syn_labels)
+                logging.info(f"Generated {syn_features.shape[0]} features (regularized covariance)")
+            fit_features = syn_features
+            fit_labels = syn_labels_t
+        else:
+            fit_features = all_features.to(args.device)
+            fit_labels = all_labels.to(args.device)
+
+        if args.rgda_train_iter > 0:
+            logging.info(f"LR-RGDA fine-tuning: {args.rgda_train_iter} iters, lr={args.rgda_train_lr}")
+            lr_rgda_classifier.fit(fit_features, fit_labels,
+                                   iterations=args.rgda_train_iter, lr=args.rgda_train_lr)
+
+        if args.enable_lada:
+            lada_classifier = LADAClassifier(feature_dim=fit_features.shape[1], beta=args.lada_beta)
+            lada_classifier.build_from_data(fit_features, fit_labels, k=args.lada_k)
+            lada_classifier.to(args.device)
+            logging.info(f"LADA built: {lada_classifier.get_total_classes()} classes, "
+                         f"k={args.lada_k}, beta={args.lada_beta}")
+            if args.lada_train_iter > 0:
+                logging.info(f"LADA fine-tuning: {args.lada_train_iter} iters, lr={args.lada_train_lr}")
+                lada_classifier.fit(fit_features, fit_labels,
+                                    iterations=args.lada_train_iter, lr=args.lada_train_lr)
+        else:
+            lada_classifier = None
+
         num_id_classes = len(all_class_names)
         zs_classifier = get_zeroshot_classifier(eval_model, processor,
                                                  all_class_names, args.device)
 
         logging.info(f"\n=== Evaluating ID Datasets {tag}===")
         id_zs, id_rgda, id_ens = [], [], []
+        id_lada, id_lada_zs = [], []
 
         id_dataset_offset_map = {}
         eval_offset = 0
         for d_name in args.id_datasets:
-            _, _, _, c_names = get_xtail_trainloader(
-                root=args.root, dataset_name=d_name,
-                transform_train=None, transform_test=None,
-                num_shots=args.num_shots, batch_size=args.batch_size
-            )
+            c_names = get_xtail_classnames(args.root, d_name, args.num_shots)
             id_dataset_offset_map[d_name] = eval_offset
             eval_offset += len(c_names)
 
         eval_offset = 0
         for d_name in args.id_datasets:
-            zs_acc, rgda_acc, ens_acc, c_len, _ = evaluate_dataset(
+            zs_acc, rgda_acc, ens_acc, lada_acc, lada_zs_acc, c_len, _ = evaluate_dataset(
                 args, d_name, eval_model, zs_classifier, lr_rgda_classifier,
-                num_id_classes, eval_offset
+                num_id_classes, eval_offset,
+                lada_classifier=lada_classifier, lada_alpha=args.lada_alpha
             )
             id_zs.append(zs_acc)
             id_rgda.append(rgda_acc)
             id_ens.append(ens_acc)
+            if lada_classifier is not None:
+                id_lada.append(lada_acc)
+                id_lada_zs.append(lada_zs_acc)
             eval_offset += c_len
-            logging.info(f"[{tag} ID] {d_name:<12s} | ZS: {zs_acc:5.1f}% | "
-                         f"RGDA: {rgda_acc:5.1f}% | Ensemble: {ens_acc:5.1f}%")
+            log_str = f"[{tag} ID] {d_name:<12s} | ZS: {zs_acc:5.1f}% | " \
+                      f"RGDA: {rgda_acc:5.1f}% | Ensemble: {ens_acc:5.1f}%"
+            if lada_classifier is not None:
+                log_str += f" | LADA: {lada_acc:5.1f}% | LADA+ZS: {lada_zs_acc:5.1f}%"
+            logging.info(log_str)
 
         id_zs_avg = sum(id_zs) / len(id_zs)
         id_rgda_avg = sum(id_rgda) / len(id_rgda)
         id_ens_avg = sum(id_ens) / len(id_ens)
+        id_lada_avg = sum(id_lada) / len(id_lada) if id_lada else None
+        id_lada_zs_avg = sum(id_lada_zs) / len(id_lada_zs) if id_lada_zs else None
 
         # 打印格式化总表（中间评估 + 最终评估共用）
+        header = f"{'Dataset':<15s} | {'Zero-shot':>9s} | {'LR-RGDA':>9s} | {'Ensemble':>9s}"
+        sep = "-" * 55
+        if lada_classifier is not None:
+            header += f" | {'LADA':>9s} | {'LADA+ZS':>9s}"
+            sep = "-" * 79
         print(f"\n[{tag} ID Summary]")
-        print(f"{'Dataset':<15s} | {'Zero-shot':>9s} | {'LR-RGDA':>9s} | {'Ensemble':>9s}")
-        print("-" * 55)
-        for d_name, zs, rgda, ens in zip(args.id_datasets, id_zs, id_rgda, id_ens):
-            print(f"{d_name:<15s} | {zs:>7.1f}%  | {rgda:>7.1f}%  | {ens:>7.1f}%")
-        print("-" * 55)
-        print(f"{'Average':<15s} | {id_zs_avg:>7.1f}%  | {id_rgda_avg:>7.1f}%  | {id_ens_avg:>7.1f}%")
+        print(header)
+        print(sep)
+        for i, d_name in enumerate(args.id_datasets):
+            row = f"{d_name:<15s} | {id_zs[i]:>7.1f}%  | {id_rgda[i]:>7.1f}%  | {id_ens[i]:>7.1f}%"
+            if lada_classifier is not None:
+                row += f" | {id_lada[i]:>7.1f}%  | {id_lada_zs[i]:>7.1f}%"
+            print(row)
+        print(sep)
+        avg_row = f"{'Average':<15s} | {id_zs_avg:>7.1f}%  | {id_rgda_avg:>7.1f}%  | {id_ens_avg:>7.1f}%"
+        if lada_classifier is not None:
+            avg_row += f" | {id_lada_avg:>7.1f}%  | {id_lada_zs_avg:>7.1f}%"
+        print(avg_row)
 
         return (id_zs, id_rgda, id_ens, id_zs_avg, id_rgda_avg, id_ens_avg,
-                id_dataset_offset_map, num_id_classes, zs_classifier, lr_rgda_classifier)
+                id_lada, id_lada_zs, id_lada_avg, id_lada_zs_avg,
+                id_dataset_offset_map, num_id_classes, zs_classifier,
+                lr_rgda_classifier, lada_classifier)
 
     all_class_names = []
-    if tune_student:
+    if tune_student and args.iterations > 0:
         # 只有在微调且蒸馏损失权重 > 0 时才加载参考数据集
         use_distillation = args.fd_weight > 0 or args.cd_weight > 0
         if use_distillation:
@@ -354,11 +558,7 @@ def main(args):
         offset = 0
         for d_name in args.id_datasets:
             dataset_offsets[d_name] = offset
-            _, _, _, c_names = get_xtail_trainloader(
-                root=args.root, dataset_name=d_name,
-                transform_train=None, transform_test=None,
-                num_shots=args.num_shots, batch_size=args.batch_size
-            )
+            c_names = get_xtail_classnames(args.root, d_name, args.num_shots)
             offset += len(c_names)
 
         def eval_callback(current_model, step):
@@ -379,38 +579,38 @@ def main(args):
         # 训练完成后执行完整评估（使用合并后的模型）
         (id_zs_accs, id_rgda_accs, id_ens_accs,
          id_zs_avg, id_rgda_avg, id_ens_avg,
+         id_lada_accs, id_lada_zs_accs, id_lada_avg, id_lada_zs_avg,
          id_dataset_offset, num_id_classes,
-         zeroshot_classifier, lr_rgda_classifier) = run_full_evaluation(model, tag="Final")
+         zeroshot_classifier, lr_rgda_classifier, lada_classifier) = run_full_evaluation(model, tag="Final")
 
     else:
-        logging.info("\n=== Skipping Fine-tuning (tune_student=False) ===")
+        logging.info(f"\n=== Skipping Fine-tuning (tune_student={args.tune_student}, iterations={args.iterations}) ===")
         for d_name in args.id_datasets:
-            _, _, _, c_names = get_xtail_trainloader(
-                root=args.root, dataset_name=d_name,
-                transform_train=None, transform_test=None,
-                num_shots=args.num_shots, batch_size=args.batch_size
-            )
+            c_names = get_xtail_classnames(args.root, d_name, args.num_shots)
             all_class_names.extend(c_names)
 
         (id_zs_accs, id_rgda_accs, id_ens_accs,
          id_zs_avg, id_rgda_avg, id_ens_avg,
+         id_lada_accs, id_lada_zs_accs, id_lada_avg, id_lada_zs_avg,
          id_dataset_offset, num_id_classes,
-         zeroshot_classifier, lr_rgda_classifier) = run_full_evaluation(model, tag="No-tune")
+         zeroshot_classifier, lr_rgda_classifier, lada_classifier) = run_full_evaluation(model, tag="No-tune")
 
     # ========== 4. 评估 OOD 数据集 ==========
     logging.info("\n=== Evaluating OOD Datasets (Ensemble with alpha=%.1f) ===" % args.alpha)
     ood_zs_accs = []
     ood_rgda_accs = []
     ood_ens_accs = []
+    ood_lada_accs = []
+    ood_lada_zs_accs = []
 
     for d_name in args.ood_datasets:
         if d_name in id_dataset_offset:
-            zs_acc, rgda_acc, ens_acc, _, _ = evaluate_dataset(
+            zs_acc, rgda_acc, ens_acc, lada_acc, lada_zs_acc, _, _ = evaluate_dataset(
                 args, d_name, model, zeroshot_classifier, lr_rgda_classifier,
-                num_id_classes, id_dataset_offset[d_name]
+                num_id_classes, id_dataset_offset[d_name],
+                lada_classifier=lada_classifier, lada_alpha=args.lada_alpha
             )
         else:
-            # 构建 ID + OOD 联合零样本分类器，使 ensemble 能正确选择
             _, test_transform = get_transforms(d_name)
             _, te_loader, _, ood_c_names = get_xtail_trainloader(
                 root=args.root, dataset_name=d_name,
@@ -421,16 +621,23 @@ def main(args):
             combined_zeroshot = get_zeroshot_classifier(model, processor, combined_class_names, args.device)
             total_classes = len(combined_class_names)
 
-            zs_acc, rgda_acc, ens_acc, _, _ = evaluate_dataset(
+            zs_acc, rgda_acc, ens_acc, lada_acc, lada_zs_acc, _, _ = evaluate_dataset(
                 args, d_name, model, combined_zeroshot, lr_rgda_classifier,
-                num_id_classes, num_id_classes
+                num_id_classes, num_id_classes,
+                lada_classifier=lada_classifier, lada_alpha=args.lada_alpha
             )
 
         ood_zs_accs.append(zs_acc)
         ood_rgda_accs.append(rgda_acc)
         ood_ens_accs.append(ens_acc)
-        logging.info(f"[OOD] {d_name:<12s} | ZS: {zs_acc:5.1f}% | "
-                     f"RGDA: {rgda_acc:5.1f}% | Ensemble: {ens_acc:5.1f}%")
+        if lada_classifier is not None:
+            ood_lada_accs.append(lada_acc)
+            ood_lada_zs_accs.append(lada_zs_acc)
+        log_str = f"[OOD] {d_name:<12s} | ZS: {zs_acc:5.1f}% | " \
+                  f"RGDA: {rgda_acc:5.1f}% | Ensemble: {ens_acc:5.1f}%"
+        if lada_classifier is not None:
+            log_str += f" | LADA: {lada_acc:5.1f}% | LADA+ZS: {lada_zs_acc:5.1f}%"
+        logging.info(log_str)
 
     # ========== 6. 打印指标报告 ==========
     all_zs_accs = id_zs_accs + ood_zs_accs
@@ -451,35 +658,69 @@ def main(args):
     total_rgda_avg = sum(all_rgda_accs) / len(all_rgda_accs)
     total_ens_avg = sum(all_ens_accs) / len(all_ens_accs)
 
+    has_lada = lada_classifier is not None
+    if has_lada:
+        id_lada_avg = sum(id_lada_accs) / len(id_lada_accs) if id_lada_accs else 0.0
+        id_lada_zs_avg = sum(id_lada_zs_accs) / len(id_lada_zs_accs) if id_lada_zs_accs else 0.0
+        if len(ood_lada_accs) > 0:
+            ood_lada_avg = sum(ood_lada_accs) / len(ood_lada_accs)
+            ood_lada_zs_avg = sum(ood_lada_zs_accs) / len(ood_lada_zs_accs)
+        else:
+            ood_lada_avg = ood_lada_zs_avg = 0.0
+        all_lada_accs = id_lada_accs + ood_lada_accs
+        all_lada_zs_accs = id_lada_zs_accs + ood_lada_zs_accs
+        total_lada_avg = sum(all_lada_accs) / len(all_lada_accs)
+        total_lada_zs_avg = sum(all_lada_zs_accs) / len(all_lada_zs_accs)
+
     print("\n" + "=" * 110)
     print("JOINT FINE-TUNING RESULTS")
     print("=" * 110)
 
+    # 构建表格头
+    id_header = f"{'Dataset':<15s} | {'Zero-shot':>9s} | {'LR-RGDA':>9s} | {'Ensemble':>9s}"
+    id_sep = "-" * 55
+    if has_lada:
+        id_header += f" | {'LADA':>9s} | {'LADA+ZS':>9s}"
+        id_sep = "-" * 79
+
     # ID 数据集详细结果
     print("\n[ID Datasets — Fine-tuned]")
-    print(f"{'Dataset':<15s} | {'Zero-shot':>9s} | {'LR-RGDA':>9s} | {'Ensemble':>9s}")
-    print("-" * 55)
-    for d_name, zs, rgda, ens in zip(args.id_datasets,
-                                     id_zs_accs, id_rgda_accs, id_ens_accs):
-        print(f"{d_name:<15s} | {zs:>7.1f}%  | {rgda:>7.1f}%  | {ens:>7.1f}%")
-    print("-" * 55)
-    print(f"{'ID Average':<15s} | {id_zs_avg:>7.1f}%  | {id_rgda_avg:>7.1f}%  | {id_ens_avg:>7.1f}%")
+    print(id_header)
+    print(id_sep)
+    for i, d_name in enumerate(args.id_datasets):
+        row = f"{d_name:<15s} | {id_zs_accs[i]:>7.1f}%  | {id_rgda_accs[i]:>7.1f}%  | {id_ens_accs[i]:>7.1f}%"
+        if has_lada:
+            row += f" | {id_lada_accs[i]:>7.1f}%  | {id_lada_zs_accs[i]:>7.1f}%"
+        print(row)
+    print(id_sep)
+    avg_row = f"{'ID Average':<15s} | {id_zs_avg:>7.1f}%  | {id_rgda_avg:>7.1f}%  | {id_ens_avg:>7.1f}%"
+    if has_lada:
+        avg_row += f" | {id_lada_avg:>7.1f}%  | {id_lada_zs_avg:>7.1f}%"
+    print(avg_row)
 
     # OOD 数据集详细结果
     if len(args.ood_datasets) > 0:
         print(f"\n[OOD Datasets — Non-fine-tuned]")
-        print(f"{'Dataset':<15s} | {'Zero-shot':>9s} | {'LR-RGDA':>9s} | {'Ensemble':>9s}")
-        print("-" * 55)
-        for d_name, zs, rgda, ens in zip(args.ood_datasets,
-                                         ood_zs_accs, ood_rgda_accs, ood_ens_accs):
-            print(f"{d_name:<15s} | {zs:>7.1f}%  | {rgda:>7.1f}%  | {ens:>7.1f}%")
-        print("-" * 55)
-        print(f"{'OOD Average':<15s} | {ood_zs_avg:>7.1f}%  | {ood_rgda_avg:>7.1f}%  | {ood_ens_avg:>7.1f}%")
-        print("-" * 55)
+        print(id_header)
+        print(id_sep)
+        for i, d_name in enumerate(args.ood_datasets):
+            row = f"{d_name:<15s} | {ood_zs_accs[i]:>7.1f}%  | {ood_rgda_accs[i]:>7.1f}%  | {ood_ens_accs[i]:>7.1f}%"
+            if has_lada:
+                row += f" | {ood_lada_accs[i]:>7.1f}%  | {ood_lada_zs_accs[i]:>7.1f}%"
+            print(row)
+        print(id_sep)
+        avg_row = f"{'OOD Average':<15s} | {ood_zs_avg:>7.1f}%  | {ood_rgda_avg:>7.1f}%  | {ood_ens_avg:>7.1f}%"
+        if has_lada:
+            avg_row += f" | {ood_lada_avg:>7.1f}%  | {ood_lada_zs_avg:>7.1f}%"
+        print(avg_row)
+        print(id_sep)
 
     # 全部数据集总平均
     print(f"\n[All Datasets — Total Average]")
-    print(f"{'All Average':<15s} | {total_zs_avg:>7.1f}%  | {total_rgda_avg:>7.1f}%  | {total_ens_avg:>7.1f}%")
+    total_row = f"{'All Average':<15s} | {total_zs_avg:>7.1f}%  | {total_rgda_avg:>7.1f}%  | {total_ens_avg:>7.1f}%"
+    if has_lada:
+        total_row += f" | {total_lada_avg:>7.1f}%  | {total_lada_zs_avg:>7.1f}%"
+    print(total_row)
     print("=" * 110)
 
     # ========== 7. Alpha 敏感性分析（批处理，如 debug_classifier_router.py）==========
@@ -571,6 +812,21 @@ def main(args):
             }
         }
     }
+
+    # 追加 LADA 指标（如果启用）
+    if has_lada:
+        save_results["metrics"]["id"]["per_dataset"]["lada"] = {d: v for d, v in zip(args.id_datasets, id_lada_accs)}
+        save_results["metrics"]["id"]["per_dataset"]["lada_zs"] = {d: v for d, v in zip(args.id_datasets, id_lada_zs_accs)}
+        save_results["metrics"]["id"]["average"]["lada"] = id_lada_avg
+        save_results["metrics"]["id"]["average"]["lada_zs"] = id_lada_zs_avg
+        save_results["metrics"]["ood"]["per_dataset"]["lada"] = {d: v for d, v in zip(args.ood_datasets, ood_lada_accs)}
+        save_results["metrics"]["ood"]["per_dataset"]["lada_zs"] = {d: v for d, v in zip(args.ood_datasets, ood_lada_zs_accs)}
+        save_results["metrics"]["ood"]["average"]["lada"] = ood_lada_avg
+        save_results["metrics"]["ood"]["average"]["lada_zs"] = ood_lada_zs_avg
+        save_results["metrics"]["total"]["per_dataset"]["lada"] = {d: v for d, v in zip(all_dataset_names, all_lada_accs)}
+        save_results["metrics"]["total"]["per_dataset"]["lada_zs"] = {d: v for d, v in zip(all_dataset_names, all_lada_zs_accs)}
+        save_results["metrics"]["total"]["average"]["lada"] = total_lada_avg
+        save_results["metrics"]["total"]["average"]["lada_zs"] = total_lada_zs_avg
 
     # 如果有敏感性分析，追加保存
     if args.alpha_sensitivity:

@@ -158,6 +158,72 @@ class VanillaLoRACLIPVisionTransformer(nn.Module):
         return torch.tensor(0.0, device=next(self.parameters()).device)
 
 
+class VanillaLoRACLIPTextTransformer(nn.Module):
+    """
+    使用普通 LoRA 的 CLIP Text Transformer
+    作为最基础的 LoRA 基线，无 SGP/NSP 投影
+    """
+    def __init__(
+        self,
+        clip_text_model: nn.Module,
+        r: int,
+        lora_layer: Optional[Iterable[int]] = None,
+        lora_alpha: float = 1.0,
+        lora_dropout: float = 0.0,
+        include_norm: bool = False
+    ):
+        super().__init__()
+        assert r > 0, "LoRA rank r must be positive"
+        self.r = r
+        self.lora_alpha = lora_alpha
+        self.feature_dim = clip_text_model.config.hidden_size
+
+        for n, p in clip_text_model.named_parameters():
+            if include_norm and ("norm" in n or "layernorm" in n.lower()):
+                p.requires_grad_(True)
+            else:
+                p.requires_grad_(False)
+
+        self.lora_layer = list(lora_layer) if lora_layer is not None else list(range(len(clip_text_model.encoder.layers)))
+        self.lora_modules = nn.ModuleDict()
+
+        for idx, layer in enumerate(clip_text_model.encoder.layers):
+            if idx not in self.lora_layer:
+                continue
+            for proj_name in ["k_proj", "v_proj", "q_proj", "out_proj"]:
+                linear = getattr(layer.self_attn, proj_name)
+                lora_mod = VanillaLoRALinear(linear, r, lora_alpha, lora_dropout)
+                setattr(layer.self_attn, proj_name, lora_mod)
+                self.lora_modules[f"layer_{idx}_attn_{proj_name}"] = lora_mod
+            for mlp_name in ["fc1", "fc2"]:
+                linear = getattr(layer.mlp, mlp_name)
+                lora_mod = VanillaLoRALinear(linear, r, lora_alpha, lora_dropout)
+                setattr(layer.mlp, mlp_name, lora_mod)
+                self.lora_modules[f"layer_{idx}_mlp_{mlp_name}"] = lora_mod
+
+        self.clip_text_model = clip_text_model
+
+    def forward(self, input_ids=None, attention_mask=None, **kwargs) -> torch.Tensor:
+        return self.clip_text_model(input_ids=input_ids, attention_mask=attention_mask, **kwargs)
+
+    def get_params(self):
+        params = []
+        for name, param in self.named_parameters():
+            if param.requires_grad:
+                params.append(param)
+        return params
+
+    def merge_lora_weights(self):
+        for _, mod in self.lora_modules.items():
+            mod.merge_lora_weights()
+
+    def get_module_names(self):
+        return list(self.lora_modules.keys())
+
+    def regularization_loss(self) -> torch.Tensor:
+        return torch.tensor(0.0, device=next(self.parameters()).device)
+
+
 def get_vanilla_lora_model(args):
     """
     获取普通 LoRA 模型（基线）

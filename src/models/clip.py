@@ -1,7 +1,7 @@
 # In[]
 from torch import nn
 from src.models.lora_sgp import LoRACLIPVisionTransformer, LoRACLIPTextTransformer
-from src.models.lora_baseline import VanillaLoRACLIPVisionTransformer
+from src.models.lora_baseline import VanillaLoRACLIPVisionTransformer, VanillaLoRACLIPTextTransformer
 from transformers import CLIPModel, CLIPProcessor
 import os
 
@@ -35,11 +35,18 @@ def get_clip_model(args, train_mode="lora"):
             # 普通 LoRA 基线（无 SGP/NSP 投影）
             alpha = getattr(args, 'lora_alpha', rank)
             dropout = getattr(args, 'lora_dropout', 0.0)
-            model.vision_model = VanillaLoRACLIPVisionTransformer(
-                model.vision_model,
-                r=rank,
-                lora_alpha=alpha,
-                lora_dropout=dropout)
+            if getattr(args, 'tune_vision_encoder', True):
+                model.vision_model = VanillaLoRACLIPVisionTransformer(
+                    model.vision_model,
+                    r=rank,
+                    lora_alpha=alpha,
+                    lora_dropout=dropout)
+            if getattr(args, 'tune_text_encoder', True):
+                model.text_model = VanillaLoRACLIPTextTransformer(
+                    model.text_model,
+                    r=getattr(args, 'text_lora_rank', 4),
+                    lora_alpha=alpha,
+                    lora_dropout=dropout)
         
         elif lora_type == 'lora_nsp':
             use_soft_projection = False

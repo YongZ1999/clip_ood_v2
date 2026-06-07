@@ -321,7 +321,7 @@ class DatasetBase:
                 return data_sources[0]
             return data_sources
 
-        print(f'Creating a {num_shots}-shot dataset')
+        print(f'[num_shots={num_shots}] Training set subsampled to {num_shots} samples/class (test/val remain full)')
 
         output = []
 

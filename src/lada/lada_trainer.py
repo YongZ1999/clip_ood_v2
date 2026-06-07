@@ -71,16 +71,13 @@ class LADATrainer(LoRANSPTrainer):
 
     @torch.no_grad()
     def _extract_features_manual(self, dataloader):
-        """手动提取特征（兼容 LoRA 包装后的模型）"""
         self.model.eval()
         all_features = []
         all_labels = []
         for images, lbls in tqdm(dataloader, desc="Extracting features"):
             images = images.to(self.device)
-            vision_outputs = self.model.vision_model(images)
-            pooled = vision_outputs[1]
-            proj_feats = self.model.visual_projection(pooled)
-            feats = proj_feats / proj_feats.norm(dim=-1, keepdim=True)
+            feats = self.model.get_image_features(images)
+            feats = feats / feats.norm(dim=-1, keepdim=True)
             all_features.append(feats.cpu())
             all_labels.append(lbls)
         return torch.cat(all_features), torch.cat(all_labels)
@@ -171,10 +168,8 @@ class LADATrainer(LoRANSPTrainer):
             images = images.to(self.device)
             batch_labels = batch_labels.to(self.device)
 
-            vision_outputs = self.model.vision_model(images)
-            pooled = vision_outputs[1]
-            proj_feats = self.model.visual_projection(pooled)
-            img_feats = proj_feats / proj_feats.norm(dim=-1, keepdim=True)
+            img_feats = self.model.get_image_features(images)
+            img_feats = img_feats / img_feats.norm(dim=-1, keepdim=True)
 
             shifted_labels = batch_labels + c_prev
 

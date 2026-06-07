@@ -41,7 +41,14 @@ def get_zeroshot_classifier(model, processor, class_names, device):
     with torch.no_grad():
         text_inputs = processor(text=all_texts, return_tensors="pt", padding=True, truncation=True)
         text_inputs = {k: v.to(device) for k, v in text_inputs.items()}
-        all_embeddings = model.get_text_features(**text_inputs)
+        text_outputs = model.text_model(**text_inputs)
+        if hasattr(text_outputs, 'pooler_output') and text_outputs.pooler_output is not None:
+            pooled = text_outputs.pooler_output
+        elif hasattr(text_outputs, 'last_hidden_state'):
+            pooled = text_outputs.last_hidden_state[:, -1, :]
+        else:
+            pooled = text_outputs[1] if isinstance(text_outputs, tuple) else text_outputs
+        all_embeddings = model.text_projection(pooled)
         all_embeddings = all_embeddings / all_embeddings.norm(dim=-1, keepdim=True)
 
     zeroshot_weights = []
@@ -57,7 +64,8 @@ def get_zeroshot_classifier(model, processor, class_names, device):
 
 def evaluate_dataset(args, d_name, model, zeroshot_classifier, lr_rgda_classifier,
                      current_num_classes, eval_label_offset,
-                     alpha_sensitivity=False, n_alpha_samples=21):
+                     alpha_sensitivity=False, n_alpha_samples=21,
+                     lada_classifier=None, lada_alpha=1.0):
     """
     在单个数据集上评估 ZS / RGDA / Ensemble 准确率
 
@@ -71,10 +79,12 @@ def evaluate_dataset(args, d_name, model, zeroshot_classifier, lr_rgda_classifie
         eval_label_offset: 评估时的标签偏移量
         alpha_sensitivity: 是否对 alpha 做敏感性分析（枚举多个 alpha 值）
         n_alpha_samples: 敏感性分析时 alpha 的采样点数（默认 21，即 0, 0.05, ..., 1.0）
+        lada_classifier: LADA 分类器实例（可选，传入后额外计算 LADA / LADA+ZS 指标）
+        lada_alpha: LADA+ZS 集成中 LADA 的权重（默认 1.0）
 
     Returns:
-        (zs_acc, rgda_acc, ens_acc, num_classes_in_dataset, sensitivity_list)
-        其中 sensitivity_list 为 [(alpha, acc), ...] 或 None
+        (zs_acc, rgda_acc, ens_acc, lada_acc, lada_zs_acc, num_classes_in_dataset, sensitivity_list)
+        当 lada_classifier 为 None 时，lada_acc 和 lada_zs_acc 为 None
     """
     from utils_data import get_xtail_trainloader, get_transforms
     from src.utils.feature_extractor import extract_features
@@ -121,6 +131,18 @@ def evaluate_dataset(args, d_name, model, zeroshot_classifier, lr_rgda_classifie
         ens_preds = ensemble_logits.argmax(dim=1)
         ens_acc = ens_preds.eq(labels).float().mean().item() * 100
 
+        # LADA 和 LADA+ZS 预测（可选）
+        lada_acc, lada_zs_acc = None, None
+        if lada_classifier is not None:
+            lada_logits = lada_classifier(features)
+            lada_logits_norm = lada_logits - lada_logits.max(dim=-1, keepdim=True).values
+            lada_preds = lada_logits_norm.argmax(dim=1)
+            lada_acc = lada_preds.eq(labels).float().mean().item() * 100
+
+            lada_zs_logits = (1 - lada_alpha) * zs_logits_norm + lada_alpha * lada_logits_norm
+            lada_zs_preds = lada_zs_logits.argmax(dim=1)
+            lada_zs_acc = lada_zs_preds.eq(labels).float().mean().item() * 100
+
         # 4. Alpha 敏感性分析（可选，只在固定 α 模式下有意义）
         sensitivity_list = None
         if alpha_sensitivity and not use_adaptive:
@@ -132,7 +154,7 @@ def evaluate_dataset(args, d_name, model, zeroshot_classifier, lr_rgda_classifie
                 ens_acc_alpha = ens_preds.eq(labels).float().mean().item() * 100
                 sensitivity_list.append((round(alpha.item(), 3), round(ens_acc_alpha, 2)))
 
-    return zs_acc, rgda_acc, ens_acc, len(c_names), sensitivity_list
+    return zs_acc, rgda_acc, ens_acc, lada_acc, lada_zs_acc, len(c_names), sensitivity_list
 
 
 def batch_evaluate_datasets(

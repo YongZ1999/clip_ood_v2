@@ -594,3 +594,53 @@ class LRRGDA(nn.Module):
         logits = self.forward(x)
         temp = temperature if temperature is not None else self.temperature
         return F.softmax(logits / temp, dim=1)
+
+    def fit(self, features, labels, iterations=200, lr=0.01, verbose=True):
+        """
+        梯度微调 affine_weights 和 affine_biases（协方差结构保持冻结）
+
+        Args:
+            features: (N, D) 特征
+            labels: (N,) 全局标签
+            iterations: 训练迭代次数
+            lr: 学习率
+            verbose: 是否打印日志
+        """
+        device = features.device
+        features = features.to(device)
+        labels = labels.to(device)
+
+        if self.num_centers == 1:
+            self.affine_weights = nn.Parameter(self.affine_weights.detach().clone())
+            self.affine_biases = nn.Parameter(self.affine_biases.detach().clone())
+            trainable = [self.affine_weights, self.affine_biases]
+        else:
+            self.affine_weights = nn.Parameter(self.affine_weights.detach().clone())
+            self.affine_biases = nn.Parameter(self.affine_biases.detach().clone())
+            trainable = [self.affine_weights, self.affine_biases]
+
+        optimizer = torch.optim.AdamW(trainable, lr=lr)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=iterations, eta_min=lr / 10)
+
+        for i in range(iterations):
+            logits = self.forward(features)
+            loss = F.cross_entropy(logits, labels)
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            scheduler.step()
+
+            if verbose and (i == 0 or (i + 1) % max(1, iterations // 5) == 0):
+                acc = logits.argmax(dim=-1).eq(labels).float().mean().item() * 100
+                logging.info(f"LRRGDA-fit [{i+1}/{iterations}] "
+                             f"loss={loss.item():.4f} acc={acc:.1f}%")
+
+        # 恢复为 buffer
+        w = self.affine_weights.detach()
+        b = self.affine_biases.detach()
+        del self.affine_weights
+        del self.affine_biases
+        self.register_buffer('affine_weights', w)
+        self.register_buffer('affine_biases', b)

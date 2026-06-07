@@ -109,6 +109,10 @@ class LRRGDAClassifier:
     def forward(self, features: torch.Tensor) -> torch.Tensor:
         """前向传播（返回logits）"""
         return self.classifier.forward(features)
+
+    def fit(self, features, labels, iterations=200, lr=0.01, verbose=True):
+        """梯度微调 RGDA 分类器权重"""
+        self.classifier.fit(features, labels, iterations=iterations, lr=lr, verbose=verbose)
     
     @property
     def class_ids(self):

@@ -26,10 +26,25 @@ dataset_list = {
                 "sun397": SUN397
                 }
 
+# 数据集缓存：避免重复读取 + 下采样
+_dataset_cache = {}
+
+
+def build_dataset(root, dataset_name, num_shots):
+    key = (root, dataset_name, num_shots)
+    if key not in _dataset_cache:
+        _dataset_cache[key] = dataset_list[dataset_name](root, num_shots)
+    return _dataset_cache[key]
+
+
+def get_classnames(root, dataset_name, num_shots):
+    dataset = build_dataset(root, dataset_name, num_shots)
+    return dataset.classnames
+
 
 def build_cur_task_data_loader(root, dataset_name, transform_train, transform_test, num_shots, batch_size, num_workers):
     print(dataset_name)
-    dataset = dataset_list[dataset_name](root, num_shots)
+    dataset = build_dataset(root, dataset_name, num_shots)
     train_set = dataset.train_x
     test_set = dataset.test
     classnames = dataset.classnames

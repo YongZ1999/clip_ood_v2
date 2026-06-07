@@ -340,6 +340,10 @@ class LoRANSPTrainer:
 
         ema_loss = torch.tensor(0.0)
         ema_acc = torch.tensor(0.0)
+        ema_aux_ce = torch.tensor(0.0)
+        ema_aux_acc = torch.tensor(0.0)
+        ema_fd = torch.tensor(0.0)
+        ema_cd = torch.tensor(0.0)
 
         pbar = tqdm(range(self.args.iterations), desc="Training")
         for i in pbar:
@@ -355,9 +359,7 @@ class LoRANSPTrainer:
             # --- 前向传播 ---
             vision_ctx = torch.no_grad() if not self.has_vision_lora else torch.enable_grad()
             with vision_ctx:
-                vision_outputs = self.model.vision_model(images)
-                pooled = vision_outputs[1]
-                proj_feats = self.model.visual_projection(pooled)
+                proj_feats = self.model.get_image_features(images)
             norm_feats = proj_feats / proj_feats.norm(dim=-1, keepdim=True)
 
             # --- ZS 分类器 ---
@@ -431,8 +433,7 @@ class LoRANSPTrainer:
 
                 vision_ctx_ref = torch.no_grad() if not self.has_vision_lora else torch.enable_grad()
                 with vision_ctx_ref:
-                    r_vision = self.model.vision_model(r_imgs)
-                    s_img_f = self.model.visual_projection(r_vision[1])
+                    s_img_f = self.model.get_image_features(r_imgs)
                 s_img_f = s_img_f / s_img_f.norm(dim=-1, keepdim=True)
 
                 l_fd = feature_distillation_loss(t_img_f, s_img_f)
@@ -459,21 +460,25 @@ class LoRANSPTrainer:
 
             ema_loss = 0.95 * ema_loss + 0.05 * loss.item()
             ema_acc = 0.95 * ema_acc + 0.05 * train_acc
+            ema_aux_ce = 0.95 * ema_aux_ce + 0.05 * aux_ce_val
+            ema_aux_acc = 0.95 * ema_aux_acc + 0.05 * aux_acc_val
+            ema_fd = 0.95 * ema_fd + 0.05 * l_fd_val
+            ema_cd = 0.95 * ema_cd + 0.05 * l_cd_val
 
             pbar.set_postfix({
                 'Loss': f"{ema_loss.item():.3f}",
                 'Acc': f"{ema_acc.item():.1f}%",
-                'AuxCE': f"{aux_ce_val:.3f}",
-                'AuxAcc': f"{aux_acc_val:.1f}%",
-                'FD': f"{l_fd_val:.4f}",
-                'CD': f"{l_cd_val:.4f}",
+                'AuxCE': f"{ema_aux_ce.item():.3f}",
+                'AuxAcc': f"{ema_aux_acc.item():.1f}%",
+                'FD': f"{ema_fd.item():.4f}",
+                'CD': f"{ema_cd.item():.4f}",
             })
 
             if (i + 1) % 50 == 0 or (i + 1) == self.args.iterations:
                 logging.info(f"Iter[{i+1:03d}/{self.args.iterations}] | "
                              f"Loss: {ema_loss.item():.4f} | Acc: {ema_acc.item():.2f}% | "
-                             f"AuxCE: {aux_ce_val:.4f} | AuxAcc: {aux_acc_val:.2f}% | "
-                             f"FD: {l_fd_val:.4f} | CD: {l_cd_val:.4f}")
+                             f"AuxCE: {ema_aux_ce.item():.4f} | AuxAcc: {ema_aux_acc.item():.2f}% | "
+                             f"FD: {ema_fd.item():.4f} | CD: {ema_cd.item():.4f}")
 
             if eval_interval > 0 and eval_callback is not None and (i + 1) % eval_interval == 0:
                 eval_callback(self.model, i + 1)

@@ -19,7 +19,12 @@ def extract_features(model, dataloader, device):
     
     for images, lbls in tqdm(dataloader, desc="Extracting features"):
         images = images.to(device)
-        feats = model.get_image_features(images)
+        vision_outputs = model.vision_model(images)
+        if hasattr(vision_outputs, 'pooler_output') and vision_outputs.pooler_output is not None:
+            pooled = vision_outputs.pooler_output
+        else:
+            pooled = vision_outputs[1]
+        feats = model.visual_projection(pooled)
         feats = feats / feats.norm(dim=-1, keepdim=True)
         features.append(feats.cpu())
         labels.append(lbls.cpu())

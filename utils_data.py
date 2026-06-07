@@ -58,6 +58,11 @@ def get_xtail_trainloader(root, dataset_name, transform_train, transform_test, n
     
     return train_loader, train_loader4updating, test_loader, classnames
 
+def get_xtail_classnames(root, dataset_name, num_shots=16):
+    from scenario_datasets.build_functions import get_classnames as _get_classnames
+    return _get_classnames(root, dataset_name, num_shots)
+
+
 def get_xtail_testloader(root, dataset_sequence, transform_test, batch_size=64, num_workers=4, max_num_per_dataset=None):
     """获取X-TAIL测试集数据加载器
     

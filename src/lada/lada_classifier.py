@@ -85,7 +85,7 @@ class LADAClassifier(nn.Module):
         if N1 > 0 and D1 > 0:
             joint_classifier[:N1, :D1] = self.joint_classifier
         joint_classifier[N1:, D1:] = curr_classifier
-        self.joint_classifier = joint_classifier
+        self.register_buffer('joint_classifier', joint_classifier)
 
         self.num_curr_classes = num_classes
 
@@ -106,13 +106,52 @@ class LADAClassifier(nn.Module):
         if lada_features is None:
             if self.curr_lada_features is not None:
                 lada_features = torch.cat([self.prev_lada_features,
-                                           self.curr_lada_features], dim=1)
+                                            self.curr_lada_features], dim=1)
             else:
                 lada_features = self.prev_lada_features
 
+        device = image_features.device
+        lada_features = lada_features.to(device)
         affinity = image_features @ lada_features
-        lada_logits = torch.exp(-self.beta * (1 - affinity)) @ self.joint_classifier
+        lada_logits = torch.exp(-self.beta * (1 - affinity)) @ self.joint_classifier.to(device)
         return lada_logits
+
+    def fit(self, features, labels, iterations=100, lr=0.01, verbose=True):
+        """
+        用梯度下降微调 curr_lada_features
+
+        Args:
+            features: (N, D) 归一化后的图像特征
+            labels: (N,) 全局标签空间中的类别标签
+            iterations: 训练迭代次数
+            lr: 学习率
+            verbose: 是否打印训练日志
+        """
+        if self.curr_lada_features is None:
+            logging.warning("LADA fit: no curr_lada_features to train")
+            return
+
+        device = features.device
+        features = features.to(device)
+        labels = labels.to(device)
+
+        optimizer = torch.optim.AdamW([self.curr_lada_features], lr=lr)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=iterations, eta_min=lr / 10)
+
+        for i in range(iterations):
+            logits = self.forward(features)
+            loss = F.cross_entropy(logits, labels)
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            scheduler.step()
+
+            if verbose and (i == 0 or (i + 1) % max(1, iterations // 5) == 0):
+                acc = logits.argmax(dim=-1).eq(labels).float().mean().item() * 100
+                logging.info(f"LADA-fit [{i+1}/{iterations}] "
+                             f"loss={loss.item():.4f} acc={acc:.1f}%")
 
     def finalize_task(self):
         """
@@ -121,10 +160,10 @@ class LADAClassifier(nn.Module):
         2. curr_lada_features 置空
         """
         if self.curr_lada_features is not None:
-            self.prev_lada_features = torch.cat([
+            self.register_buffer('prev_lada_features', torch.cat([
                 self.prev_lada_features,
                 self.curr_lada_features.detach()
-            ], dim=1)
+            ], dim=1))
             self.curr_lada_features = None
             self.curr_classifier = None
             self.num_prev_classes += self.num_curr_classes
