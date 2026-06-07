@@ -1,11 +1,14 @@
 """
-集成分类器 Alpha 失调诊断脚本
+集成分类器 Alpha 失调诊断脚本 v2
 
-实验目的：研究微调后 LR-RGDA 分类器与零样本分类器的集成行为
-
-实验 1：4 种 RGDA 配置的 alpha sweep（加权混合）
-实验 2：Logit 分布统计（margin, entropy, std）
+实验 1：6 种 RGDA 配置的 alpha sweep（加权混合）
+  A/B: 分析版（1/4-center）
+  C/D: 真实特征微调（1/4-center）
+  E/F: GMM 伪特征微调（1/4-center）
+实验 2：Logit 分布统计
 实验 3：两种集成方式对比（加权混合 vs 加法+指数变换）
+
+指标：per-dataset 平均准确率（10 个数据集等权平均）
 
 用法：
     python debug_ensemble_alpha.py --id_datasets ALL --gpu 0
@@ -20,6 +23,7 @@ import torch.nn.functional as F
 import argparse
 import logging
 import numpy as np
+from sklearn.mixture import GaussianMixture
 
 from src.models.clip import get_clip_model
 from src.classifiers.lr_rgda_classifier import LRRGDAClassifier
@@ -35,7 +39,7 @@ ALL_XTAIL_DATASETS = [
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Ensemble Alpha Diagnosis")
+    parser = argparse.ArgumentParser(description="Ensemble Alpha Diagnosis v2")
     parser.add_argument("--id_datasets", type=str, nargs='+', default=ALL_XTAIL_DATASETS)
     parser.add_argument("--root", type=str, default="/data1/open_datasets/X-TAIL")
     parser.add_argument("--num_shots", type=int, default=16)
@@ -49,10 +53,10 @@ def parse_args():
     parser.add_argument("--rgda_alpha3", type=float, default=0.5)
     parser.add_argument("--rgda_train_iter", type=int, default=200)
     parser.add_argument("--rgda_train_lr", type=float, default=0.01)
-    parser.add_argument("--n_alpha", type=int, default=41,
-                        help="alpha 扫描点数 (0 到 1 之间等分)")
-    parser.add_argument("--beta_values", type=float, nargs='+', default=[0.5, 1.0, 2.0, 5.0],
-                        help="指数变换的 β 值列表")
+    parser.add_argument("--n_alpha", type=int, default=41)
+    parser.add_argument("--beta_values", type=float, nargs='+', default=[0.5, 1.0, 2.0, 5.0])
+    parser.add_argument("--gmm_k", type=int, default=4)
+    parser.add_argument("--gaussian_samples_per_class", type=int, default=16)
     args = parser.parse_args()
 
     if len(args.id_datasets) == 1 and args.id_datasets[0].upper() == 'ALL':
@@ -98,6 +102,42 @@ def build_rgda_classifier(train_feats, train_labels, args, num_centers, do_fit):
     return classifier
 
 
+def sample_gmm_features(raw_features, labels, n_classes, gmm_k, samples_per_class, device):
+    features_np = raw_features.cpu().numpy()
+    labels_np = labels.cpu().numpy()
+    syn_feats = []
+    syn_labels = []
+
+    for cid in range(n_classes):
+        mask = labels_np == cid
+        feats_c = features_np[mask]
+
+        actual_k = min(gmm_k, len(feats_c)) if len(feats_c) > 0 else 1
+        if len(feats_c) == 0:
+            continue
+
+        gmm = GaussianMixture(n_components=actual_k, covariance_type='spherical',
+                              random_state=42, reg_covar=1e-6)
+        gmm.fit(feats_c)
+
+        total = samples_per_class
+        n_per_comp = np.maximum(1, (gmm.weights_ * total).round().astype(int))
+        diff = total - n_per_comp.sum()
+        n_per_comp[np.argmax(gmm.weights_)] += diff
+
+        for comp in range(actual_k):
+            mean = torch.from_numpy(gmm.means_[comp]).float()
+            var = gmm.covariances_[comp]
+            n = max(1, int(n_per_comp[comp]))
+            noise = torch.randn(n, mean.shape[0]) * np.sqrt(max(var, 1e-8))
+            samples = mean.unsqueeze(0) + noise
+            samples = samples / samples.norm(dim=-1, keepdim=True)
+            syn_feats.append(samples.to(device))
+            syn_labels.append(torch.full((samples.shape[0],), cid, device=device))
+
+    return torch.cat(syn_feats), torch.cat(syn_labels)
+
+
 def compute_logit_stats(logits, name):
     logits_norm = logits - logits.max(dim=-1, keepdim=True).values
     probs = F.softmax(logits_norm, dim=-1)
@@ -120,36 +160,35 @@ def compute_logit_stats(logits, name):
     }
 
 
-def evaluate_ensemble_weighted(zs_logits, rgda_logits, labels, num_id_classes, alpha):
-    zs_norm = zs_logits - zs_logits.max(dim=-1, keepdim=True).values
-    rgda_norm = rgda_logits - rgda_logits.max(dim=-1, keepdim=True).values
-    ens = zs_norm * (1 - alpha)
-    ens[:, :num_id_classes] += alpha * rgda_norm
-    preds = ens.argmax(dim=1)
-    return preds.eq(labels).float().mean().item() * 100
+def per_dataset_acc(logits, labels, dataset_slices, num_id_classes, alpha, method="weighted", beta=1.0):
+    zs_norm = logits[:, :num_id_classes] - logits[:, :num_id_classes].max(dim=-1, keepdim=True).values
+    rgda_norm = logits[:, num_id_classes:] - logits[:, num_id_classes:].max(dim=-1, keepdim=True).values
+
+    accs = []
+    for start, end in dataset_slices:
+        zs = zs_norm[start:end]
+        rgda = rgda_norm[start:end]
+        lbl = labels[start:end]
+
+        if method == "weighted":
+            ens = zs * (1 - alpha) + alpha * rgda
+        elif method == "additive_exp":
+            rgda_t = torch.exp(-beta * (1 - rgda))
+            ens = zs + alpha * rgda_t
+        else:
+            raise ValueError(f"Unknown method: {method}")
+
+        acc = ens.argmax(dim=1).eq(lbl).float().mean().item() * 100
+        accs.append(acc)
+    return sum(accs) / len(accs)
 
 
-def evaluate_ensemble_additive_exp(zs_logits, rgda_logits, labels, num_id_classes, alpha, beta):
-    zs_norm = zs_logits - zs_logits.max(dim=-1, keepdim=True).values
-    rgda_norm = rgda_logits - rgda_logits.max(dim=-1, keepdim=True).values
-    rgda_transformed = torch.exp(-beta * (1 - rgda_norm))
-    ens = zs_norm + alpha * rgda_transformed
-    preds = ens.argmax(dim=1)
-    return preds.eq(labels).float().mean().item() * 100
-
-
-def alpha_sweep_weighted(zs_logits, rgda_logits, labels, num_id_classes, alphas):
+def alpha_sweep_per_dataset(combined_logits, test_labels, dataset_slices,
+                            num_id_classes, alphas, method="weighted", beta=1.0):
     results = []
     for a in alphas:
-        acc = evaluate_ensemble_weighted(zs_logits, rgda_logits, labels, num_id_classes, a)
-        results.append((round(a, 4), round(acc, 2)))
-    return results
-
-
-def alpha_sweep_additive_exp(zs_logits, rgda_logits, labels, num_id_classes, alphas, beta):
-    results = []
-    for a in alphas:
-        acc = evaluate_ensemble_additive_exp(zs_logits, rgda_logits, labels, num_id_classes, a, beta)
+        acc = per_dataset_acc(combined_logits, test_labels, dataset_slices,
+                              num_id_classes, a, method, beta)
         results.append((round(a, 4), round(acc, 2)))
     return results
 
@@ -171,7 +210,9 @@ def main(args):
     all_train_feats, all_train_labels = [], []
     all_test_feats, all_test_labels = [], []
     all_class_names = []
+    dataset_slices = []
     offset = 0
+    test_offset = 0
 
     for d_name in args.id_datasets:
         train_transform, test_transform = get_transforms(d_name)
@@ -188,21 +229,23 @@ def main(args):
         all_train_labels.append(tr_lbls + offset)
         all_test_feats.append(te_feats)
         all_test_labels.append(te_lbls + offset)
+        dataset_slices.append((test_offset, test_offset + te_feats.shape[0]))
         all_class_names.extend(c_names)
         offset += len(c_names)
+        test_offset += te_feats.shape[0]
 
-        logging.info(f"  {d_name}: train={tr_feats.shape[0]}, test={te_feats.shape[0]}, classes={len(c_names)}")
+        logging.info(f"  {d_name}: train={tr_feats.shape[0]}, test={te_feats.shape[0]}, "
+                     f"classes={len(c_names)}, test_slice=({dataset_slices[-1][0]}, {dataset_slices[-1][1]})")
 
     train_feats = torch.cat(all_train_feats)
     train_labels = torch.cat(all_train_labels)
     test_feats = torch.cat(all_test_feats)
     test_labels = torch.cat(all_test_labels)
     num_id_classes = len(all_class_names)
+    n_datasets = len(args.id_datasets)
 
-    train_feats_norm = train_feats / train_feats.norm(dim=-1, keepdim=True)
-    test_feats_norm = test_feats / test_feats.norm(dim=-1, keepdim=True)
-    train_feats_norm = train_feats_norm.to(args.device)
-    test_feats_norm = test_feats_norm.to(args.device)
+    train_feats_norm = (train_feats / train_feats.norm(dim=-1, keepdim=True)).to(args.device)
+    test_feats_norm = (test_feats / test_feats.norm(dim=-1, keepdim=True)).to(args.device)
     train_labels = train_labels.to(args.device)
     test_labels = test_labels.to(args.device)
 
@@ -212,133 +255,226 @@ def main(args):
     with torch.no_grad():
         zs_test_logits = test_feats_norm @ zs_classifier
 
-    zs_preds = (zs_test_logits - zs_test_logits.max(dim=-1, keepdim=True).values).argmax(dim=1)
-    zs_acc = zs_preds.eq(test_labels).float().mean().item() * 100
-    logging.info(f"Zero-shot accuracy: {zs_acc:.1f}%")
+    zs_per_ds = []
+    for start, end in dataset_slices:
+        zs_l = zs_test_logits[start:end]
+        zs_l_norm = zs_l - zs_l.max(dim=-1, keepdim=True).values
+        acc = zs_l_norm.argmax(dim=1).eq(test_labels[start:end]).float().mean().item() * 100
+        zs_per_ds.append(acc)
+    zs_avg = sum(zs_per_ds) / len(zs_per_ds)
+    logging.info(f"Zero-shot per-dataset avg: {zs_avg:.1f}%")
+
+    # ========== 构建 6 种配置 ==========
+    # 分析版共用一个分类器（真实特征构建，不微调）
+    logging.info("\nBuilding analytical classifier (shared for A & B)...")
+    analytical_classifier = build_rgda_classifier(
+        train_feats_norm.cpu(), train_labels.cpu(), args, num_centers=1, do_fit=False
+    )
 
     configs = [
-        ("A: 1-center analytical", 1, False),
-        ("B: 4-center analytical", 4, False),
-        ("C: 1-center fine-tuned", 1, True),
-        ("D: 4-center fine-tuned", 4, True),
+        ("A: 1c analytical",       1, False, False),
+        ("B: 4c analytical",       4, False, False),
+        ("C: 1c fit(real)",        1, True,  False),
+        ("D: 4c fit(real)",        4, True,  False),
+        ("E: 1c fit(GMM)",         1, True,  True),
+        ("F: 4c fit(GMM)",         4, True,  True),
     ]
 
     alphas = torch.linspace(0, 1.0, args.n_alpha).tolist()
+    results = {}
 
-    with torch.no_grad():
-        rgda_results = {}
+    # 分析版：构建多中心版本
+    logging.info("\nBuilding B: 4-center analytical...")
+    stats_dict_b, center_means_b = build_multi_center_stats_dict(
+        train_feats_norm.cpu(), train_labels.cpu(), M=4
+    )
+    per_dataset_covs_b = []
+    off = 0
+    for d_name in args.id_datasets:
+        c_names = get_xtail_classnames(args.root, d_name, args.num_shots)
+        n_c = len(c_names)
+        ds_cov = sum(stats_dict_b[cid].cov for cid in range(off, off + n_c)) / n_c
+        per_dataset_covs_b.append(ds_cov)
+        off += n_c
+    global_cov_b = sum(per_dataset_covs_b) / len(per_dataset_covs_b)
+    classifier_b = LRRGDAClassifier(
+        stats_dict=stats_dict_b, device=args.device,
+        rank=args.rgda_rank,
+        qda_reg_alpha1=args.rgda_alpha1,
+        qda_reg_alpha2=args.rgda_alpha2,
+        qda_reg_alpha3=args.rgda_alpha3,
+        temperature=1.0,
+        M=4, center_means=center_means_b,
+        global_cov=global_cov_b,
+    )
 
-        for cfg_name, n_centers, do_fit in configs:
-            logging.info(f"\nBuilding {cfg_name}...")
+    # GMM 采样（E/F 共用）
+    logging.info("\nSampling GMM pseudo features...")
+    raw_train_feats = train_feats / train_feats.norm(dim=-1, keepdim=True)
+    gmm_feats, gmm_labels = sample_gmm_features(
+        raw_train_feats, train_labels, num_id_classes,
+        args.gmm_k, args.gaussian_samples_per_class, args.device
+    )
+    logging.info(f"GMM sampled: {gmm_feats.shape[0]} features for {num_id_classes} classes")
+
+    for cfg_name, n_centers, do_fit, use_gmm in configs:
+        logging.info(f"\n{'='*60}")
+        logging.info(f"Config: {cfg_name}")
+        logging.info(f"  centers={n_centers}, fit={do_fit}, gmm={use_gmm}")
+
+        if cfg_name.startswith("A"):
+            classifier = analytical_classifier
+        elif cfg_name.startswith("B"):
+            classifier = classifier_b
+        else:
+            fit_feats = gmm_feats if use_gmm else train_feats_norm
+            fit_labels_use = gmm_labels if use_gmm else train_labels
             classifier = build_rgda_classifier(
-                train_feats_norm.cpu(), train_labels.cpu(), args, n_centers, do_fit
+                fit_feats.cpu(), fit_labels_use.cpu(), args, n_centers, do_fit
             )
+
+        with torch.no_grad():
             rgda_test_logits = classifier.forward(test_feats_norm)
 
-            rgda_preds = (rgda_test_logits - rgda_test_logits.max(dim=-1, keepdim=True).values).argmax(dim=1)
-            rgda_acc = rgda_preds.eq(test_labels).float().mean().item() * 100
+            combined_logits = torch.cat([zs_test_logits, rgda_test_logits], dim=1)
 
-            sweep_weighted = alpha_sweep_weighted(
-                zs_test_logits, rgda_test_logits, test_labels,
-                num_id_classes, alphas
+            # per-dataset RGDA accuracy
+            rgda_per_ds = []
+            for start, end in dataset_slices:
+                rgda_l = rgda_test_logits[start:end]
+                rgda_l_norm = rgda_l - rgda_l.max(dim=-1, keepdim=True).values
+                acc = rgda_l_norm.argmax(dim=1).eq(test_labels[start:end]).float().mean().item() * 100
+                rgda_per_ds.append(acc)
+            rgda_avg = sum(rgda_per_ds) / len(rgda_per_ds)
+
+            # alpha sweep: weighted
+            sweep_w = alpha_sweep_per_dataset(
+                combined_logits, test_labels, dataset_slices,
+                num_id_classes, alphas, method="weighted"
             )
-            best_weighted = max(sweep_weighted, key=lambda x: x[1])
+            best_w = max(sweep_w, key=lambda x: x[1])
 
-            best_additive_exp = {}
-            sweep_additive_exp = {}
+            # alpha sweep: additive exp
+            sweep_ae = {}
+            best_ae = {}
             for beta in args.beta_values:
-                sweep = alpha_sweep_additive_exp(
-                    zs_test_logits, rgda_test_logits, test_labels,
-                    num_id_classes, alphas, beta
+                sw = alpha_sweep_per_dataset(
+                    combined_logits, test_labels, dataset_slices,
+                    num_id_classes, alphas, method="additive_exp", beta=beta
                 )
-                best = max(sweep, key=lambda x: x[1])
-                sweep_additive_exp[beta] = sweep
-                best_additive_exp[beta] = best
+                sweep_ae[beta] = sw
+                best_ae[beta] = max(sw, key=lambda x: x[1])
 
-            zs_stats = compute_logit_stats(zs_test_logits, "ZS")
             rgda_stats = compute_logit_stats(rgda_test_logits, "RGDA")
 
-            rgda_results[cfg_name] = {
-                "rgda_acc": rgda_acc,
-                "weighted": {"sweep": sweep_weighted, "best": best_weighted},
-                "additive_exp": {"sweep": sweep_additive_exp, "best": best_additive_exp},
-                "zs_stats": zs_stats,
+            results[cfg_name] = {
+                "rgda_avg": rgda_avg,
+                "rgda_per_ds": rgda_per_ds,
+                "weighted": {"sweep": sweep_w, "best": best_w},
+                "additive_exp": {"sweep": sweep_ae, "best": best_ae},
                 "rgda_stats": rgda_stats,
             }
 
-    print("\n" + "=" * 110)
-    print("实验 1：Alpha Sweep — 4 种 RGDA 配置（加权混合: (1-α)*ZS + α*RGDA）")
-    print("=" * 110)
-    print(f"{'Config':<30s} | {'RGDA':>7s} | {'Best α':>8s} | {'Best Ens':>8s} | {'α=0.5':>8s} | {'ZS':>7s}")
-    print("-" * 110)
-    for cfg_name, _, _ in configs:
-        r = rgda_results[cfg_name]
-        best_a, best_acc = r["weighted"]["best"]
-        acc_05 = dict(r["weighted"]["sweep"]).get(0.5, "N/A")
-        if isinstance(acc_05, float):
-            acc_05 = f"{acc_05:.1f}"
-        print(f"{cfg_name:<30s} | {r['rgda_acc']:>5.1f}%  | {best_a:>7.3f}  | {best_acc:>6.1f}%  | {acc_05:>6s}%  | {zs_acc:>5.1f}%")
+    # ========== 输出结果 ==========
 
-    print("\n" + "=" * 110)
+    # --- 实验 1 ---
+    print("\n" + "=" * 120)
+    print("实验 1：Alpha Sweep — 6 种 RGDA 配置（加权混合, per-dataset 平均准确率）")
+    print("=" * 120)
+    print(f"{'Config':<25s} | {'RGDA':>7s} | {'Best α':>8s} | {'Best Ens':>8s} | {'α=0.5':>8s} | {'ZS avg':>7s}")
+    print("-" * 120)
+    for cfg_name, _, _, _ in configs:
+        r = results[cfg_name]
+        best_a, best_acc = r["weighted"]["best"]
+        sweep_dict = dict(r["weighted"]["sweep"])
+        closest_05 = min(sweep_dict.keys(), key=lambda x: abs(x - 0.5))
+        acc_05 = sweep_dict[closest_05]
+        print(f"{cfg_name:<25s} | {r['rgda_avg']:>5.1f}%  | {best_a:>7.3f}  | {best_acc:>6.1f}%  | {acc_05:>6.1f}%  | {zs_avg:>5.1f}%")
+
+    # --- 实验 2 ---
+    print("\n" + "=" * 120)
     print("实验 2：Logit 分布统计")
-    print("=" * 110)
-    print(f"{'Config':<30s} | {'Classifier':>10s} | {'Entropy':>8s} | {'Margin':>8s} | {'Std':>8s} | {'Spread':>8s}")
-    print("-" * 110)
-    for cfg_name, _, _ in configs:
-        r = rgda_results[cfg_name]
-        for stats_key in ["zs_stats", "rgda_stats"]:
-            s = r[stats_key]
-            print(f"{cfg_name:<30s} | {s['name']:>10s} | {s['entropy']:>8.3f} | {s['margin']:>8.4f} | {s['std']:>8.4f} | {s['spread']:>8.2f}")
-        print("-" * 110)
+    print("=" * 120)
+    print(f"{'Config':<25s} | {'Classifier':>10s} | {'Entropy':>8s} | {'Margin':>8s} | {'Std':>8s} | {'Spread':>8s}")
+    print("-" * 120)
+    print(f"{'ZS':<25s} | {'ZS':>10s} | {compute_logit_stats(zs_test_logits, 'ZS')['entropy']:>8.3f} | "
+          f"{compute_logit_stats(zs_test_logits, 'ZS')['margin']:>8.4f} | "
+          f"{compute_logit_stats(zs_test_logits, 'ZS')['std']:>8.4f} | "
+          f"{compute_logit_stats(zs_test_logits, 'ZS')['spread']:>8.2f}")
+    for cfg_name, _, _, _ in configs:
+        s = results[cfg_name]["rgda_stats"]
+        print(f"{cfg_name:<25s} | {s['name']:>10s} | {s['entropy']:>8.3f} | {s['margin']:>8.4f} | {s['std']:>8.4f} | {s['spread']:>8.2f}")
 
-    print("\n" + "=" * 110)
-    print("实验 3：两种集成方式对比")
-    print("=" * 110)
-    print(f"{'Config':<30s} | {'Method':<25s} | {'Best α':>8s} | {'Best Acc':>8s} | {'α=0.5':>8s}")
-    print("-" * 110)
-    for cfg_name, _, _ in configs:
-        r = rgda_results[cfg_name]
+    # --- 实验 3 ---
+    print("\n" + "=" * 120)
+    print("实验 3：两种集成方式对比（per-dataset 平均准确率）")
+    print("=" * 120)
+    print(f"{'Config':<25s} | {'Method':<25s} | {'Best α':>8s} | {'Best Acc':>8s} | {'α=0.5':>8s}")
+    print("-" * 120)
+    for cfg_name, _, _, _ in configs:
+        r = results[cfg_name]
         best_a, best_acc = r["weighted"]["best"]
-        acc_05 = dict(r["weighted"]["sweep"]).get(0.5, "N/A")
-        if isinstance(acc_05, float):
-            acc_05 = f"{acc_05:.1f}"
-        print(f"{cfg_name:<30s} | {'加权混合':<25s} | {best_a:>7.3f}  | {best_acc:>6.1f}%  | {acc_05:>6s}%")
+        sweep_dict = dict(r["weighted"]["sweep"])
+        closest_05 = min(sweep_dict.keys(), key=lambda x: abs(x - 0.5))
+        acc_05 = sweep_dict[closest_05]
+        print(f"{cfg_name:<25s} | {'加权混合':<25s} | {best_a:>7.3f}  | {best_acc:>6.1f}%  | {acc_05:>6.1f}%")
 
         for beta in args.beta_values:
-            best_a, best_acc = r["additive_exp"]["best"][beta]
-            acc_05 = dict(r["additive_exp"]["sweep"][beta]).get(0.5, "N/A")
-            if isinstance(acc_05, float):
-                acc_05 = f"{acc_05:.1f}"
-            method_str = f"加法+exp(β={beta})"
-            print(f"{cfg_name:<30s} | {method_str:<25s} | {best_a:>7.3f}  | {best_acc:>6.1f}%  | {acc_05:>6s}%")
-        print("-" * 110)
+            ba, bac = r["additive_exp"]["best"][beta]
+            sd = dict(r["additive_exp"]["sweep"][beta])
+            c05 = min(sd.keys(), key=lambda x: abs(x - 0.5))
+            a05 = sd[c05]
+            print(f"{cfg_name:<25s} | {'加法+exp(β='+str(beta)+')':<25s} | {ba:>7.3f}  | {bac:>6.1f}%  | {a05:>6.1f}%")
+        print("-" * 120)
 
-    print("\n" + "=" * 110)
-    print("详细 Alpha Sweep（加权混合）")
-    print("=" * 110)
+    # --- 详细 Alpha Sweep ---
+    print("\n" + "=" * 120)
+    print("详细 Alpha Sweep（加权混合, per-dataset 平均准确率）")
+    print("=" * 120)
     header = f"{'Alpha':>8s}"
-    for cfg_name, _, _ in configs:
-        short = cfg_name.split(":")[1].strip()
-        header += f" | {short:>20s}"
+    for cfg_name, _, _, _ in configs:
+        header += f" | {cfg_name:>18s}"
     print(header)
-    print("-" * 110)
+    print("-" * 120)
 
     key_alphas = [0.0, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5,
                   0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95, 1.0]
     for a in key_alphas:
         row = f"{a:>8.2f}"
-        for cfg_name, _, _ in configs:
-            sweep_dict = dict(rgda_results[cfg_name]["weighted"]["sweep"])
+        for cfg_name, _, _, _ in configs:
+            sweep_dict = dict(results[cfg_name]["weighted"]["sweep"])
             closest_a = min(sweep_dict.keys(), key=lambda x: abs(x - a))
             acc = sweep_dict[closest_a]
-            row += f" | {acc:>18.1f}%"
+            row += f" | {acc:>16.1f}%"
         print(row)
 
-    print("\n" + "=" * 110)
+    # --- Per-dataset 详细表（最佳配置） ---
+    print("\n" + "=" * 120)
+    print("Per-dataset 详细准确率（加权混合, α=best）")
+    print("=" * 120)
+    header2 = f"{'Dataset':<15s} | {'ZS':>7s}"
+    for cfg_name, _, _, _ in configs:
+        header2 += f" | {cfg_name:>14s}"
+    print(header2)
+    print("-" * 120)
+    for i, d_name in enumerate(args.id_datasets):
+        row = f"{d_name:<15s} | {zs_per_ds[i]:>5.1f}%"
+        for cfg_name, _, _, _ in configs:
+            rgda_d = results[cfg_name]["rgda_per_ds"][i]
+            row += f" | {rgda_d:>12.1f}%"
+        print(row)
+    print("-" * 120)
+    row_avg = f"{'Average':<15s} | {zs_avg:>5.1f}%"
+    for cfg_name, _, _, _ in configs:
+        row_avg += f" | {results[cfg_name]['rgda_avg']:>12.1f}%"
+    print(row_avg)
+
+    # --- 最佳加法+指数变换 ---
+    print("\n" + "=" * 120)
     print("最佳加法+指数变换配置")
-    print("=" * 110)
-    for cfg_name, _, _ in configs:
-        r = rgda_results[cfg_name]
+    print("=" * 120)
+    for cfg_name, _, _, _ in configs:
+        r = results[cfg_name]
         best_beta = None
         best_overall = -1
         for beta in args.beta_values:
@@ -346,8 +482,8 @@ def main(args):
             if acc > best_overall:
                 best_overall = acc
                 best_beta = beta
-        best_a, best_acc = r["additive_exp"]["best"][best_beta]
-        print(f"{cfg_name:<30s} | β={best_beta:.1f}, α={best_a:.3f}, Acc={best_acc:.1f}%")
+        ba, bac = r["additive_exp"]["best"][best_beta]
+        print(f"{cfg_name:<25s} | β={best_beta:.1f}, α={ba:.3f}, Acc={bac:.1f}%")
 
 
 if __name__ == "__main__":
