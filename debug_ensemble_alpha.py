@@ -231,7 +231,7 @@ def main(args):
         for cfg_name, n_centers, do_fit in configs:
             logging.info(f"\nBuilding {cfg_name}...")
             classifier = build_rgda_classifier(
-                train_feats_norm, train_labels, args, n_centers, do_fit
+                train_feats_norm.cpu(), train_labels.cpu(), args, n_centers, do_fit
             )
             rgda_test_logits = classifier.forward(test_feats_norm)
 
