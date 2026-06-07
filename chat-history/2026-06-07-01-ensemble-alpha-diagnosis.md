@@ -380,6 +380,29 @@ GMM 伪特征微调比真实特征微调低 2.5-3.3%，但远优于分析版（+
 3. **GMM 伪特征有效**：微调版 GMM 仅比真实特征低 2.5-3.3%
 4. **后续实验可直接使用 α=0.5 + 加权混合**
 
+### 实验验证细节
+
+#### 评估方式：任务不可知（Task-Agnostic）
+- argmax 在**全局类别空间**（1099 类）上执行
+- 分类器不知道当前评估的是哪个数据集
+- 一个 sun397 的样本可能被预测为 aircraft 的类
+- 然后按 dataset_slices 分组统计每个数据集的准确度
+- 最终取 10 个数据集的**等权平均**
+
+#### Alpha 边界验证
+- α=0.0 → 纯零样本分类器（ens = zs），所有配置均为 56.7%
+- α=1.0 → 纯监督分类器（ens = rgda），各配置 = 该配置的 RGDA 准确率
+
+#### 测试集：完整（未下采样）
+- 训练集：16-shot（每类 16 个样本，用于构建/微调分类器）
+- 测试集：完整（`dataset.test`，未被 `num_shots` 下采样）
+- 代码路径：`build_cur_task_data_loader` → `test_set = dataset.test`
+
+#### 特征来源
+- 模型：frozen CLIP（openai/clip-vit-base-patch16），未微调
+- 特征维度：512（clip-vit-base-patch16 的 visual projection 输出）
+- 归一化：L2 归一化后用于分类器构建和评估
+
 ### 完整 Alpha Sweep 数值表
 
 | Alpha | A:1c分析 | B:4c分析 | C:1c真实 | D:4c真实 | E:1cGMM | F:4cGMM |
