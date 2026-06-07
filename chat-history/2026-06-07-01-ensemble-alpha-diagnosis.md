@@ -102,3 +102,37 @@ python debug_ensemble_alpha.py --id_datasets ALL --gpu 0
 - `src/lada/lada_classifier.py`: LADA 的指数亲和变换参考
 - `src/classifiers/lr_rgda_classifier.py`: LR-RGDA 分类器
 - `src/classifiers/gaussian_classifier.py`: LRRGDA 底层实现
+
+---
+
+## 6. 当前进展（2026-06-07）
+
+### 已完成
+
+1. **脚本实现**：`debug_ensemble_alpha.py` 已实现并通过语法检查
+2. **chat-history 写入**：实验方案已记录
+3. **代码提交**：已提交推送到 `v2-text-lora` 分支（commit `fbfa712`）
+4. **Bug 修复**：kmeans generator 不支持 CUDA，传 CPU 特征给 `build_rgda_classifier`（commit `2cf21dc`）
+5. **服务器环境确认**：使用 `raoxuan` conda 环境（torch 2.8.0+cu128），GPU 3/4/5 空闲
+
+### 实验运行状态
+
+- 10 个 X-TAIL 数据集的**特征提取已全部完成**（aircraft → sun397）
+- 正在进入**构建 RGDA 分类器 + alpha sweep** 阶段时被中断（SSH 超时/用户中止）
+- 实验结果**尚未输出**
+
+### 待做
+
+- [ ] 重新在服务器上运行实验（建议用 `nohup` 或 `tmux` 防止中断）
+- [ ] 收集并分析结果
+- [ ] 更新 chat-history
+
+### 运行命令
+
+```bash
+# 在服务器上后台运行
+ssh raoxuan@10.20.34.30 "source ~/miniconda3/etc/profile.d/conda.sh && conda activate raoxuan && cd /home/raoxuan/projects/project_clip_continual_learning && nohup python debug_ensemble_alpha.py --id_datasets ALL --gpu 3 > experiments/ensemble_alpha_diag.log 2>&1 &"
+
+# 查看日志
+ssh raoxuan@10.20.34.30 "tail -f /home/raoxuan/projects/project_clip_continual_learning/experiments/ensemble_alpha_diag.log"
+```
