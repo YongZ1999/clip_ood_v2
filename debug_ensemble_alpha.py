@@ -216,7 +216,7 @@ def main(args):
 
     for d_name in args.id_datasets:
         train_transform, test_transform = get_transforms(d_name)
-        tr_loader, te_loader, _, c_names = get_xtail_trainloader(
+        tr_loader, _, te_loader, c_names = get_xtail_trainloader(
             root=args.root, dataset_name=d_name,
             transform_train=train_transform, transform_test=test_transform,
             num_shots=args.num_shots, batch_size=args.batch_size
