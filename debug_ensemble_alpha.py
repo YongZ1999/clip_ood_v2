@@ -541,10 +541,6 @@ def main(args):
         _print_all_tables(branch_label, configs, branch_results, zs_avg, zs_per_ds, zs_test_logits, args)
 
         del train_feats_norm, train_labels_gpu, train_feats_raw, train_labels_cpu
-        if use_test_transform:
-            del test_feats_norm, test_labels_gpu
-        if len(all_branch_results) < 2:
-            del test_feats_shared, test_labels_shared, test_feats_norm, test_labels_gpu
         torch.cuda.empty_cache()
 
     # ========== 最终对比总结 ==========
