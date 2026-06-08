@@ -193,100 +193,69 @@ def alpha_sweep_per_dataset(combined_logits, test_labels, dataset_slices,
     return results
 
 
-def main(args):
-    fix_random_seed(args.seed)
-    logging.info(f"Device: {args.device}")
-
-    logging.info("Loading CLIP model (frozen)...")
-    dummy_args = argparse.Namespace(
-        lora_type='lora_vanilla', lora_rank=4,
-        tune_vision_encoder=False, tune_text_encoder=False
-    )
-    model, processor = get_clip_model(dummy_args, train_mode='frozen')
-    model = model.to(args.device)
-    model.eval()
-
-    logging.info("Extracting features (once, cached)...")
+def _extract_features_for_branch(model, args, all_class_names, dataset_slices, use_test_transform):
+    """提取训练特征（单分支）+ 测试特征。返回 (train_feats_norm_gpu, train_labels_gpu, raw_train_feats_cpu, test_feats_norm_gpu, test_labels_gpu, zs_test_logits_gpu)"""
     all_train_feats, all_train_labels = [], []
     all_test_feats, all_test_labels = [], []
-    all_class_names = []
-    dataset_slices = []
+    all_cn = []
+    ds_slices = []
     offset = 0
     test_offset = 0
 
     for d_name in args.id_datasets:
         train_transform, test_transform = get_transforms(d_name)
+        tr_transform = test_transform if use_test_transform else train_transform
         tr_loader, _, te_loader, c_names = get_xtail_trainloader(
             root=args.root, dataset_name=d_name,
-            transform_train=train_transform, transform_test=test_transform,
+            transform_train=tr_transform, transform_test=test_transform,
             num_shots=args.num_shots, batch_size=args.batch_size
         )
-
         tr_feats, tr_lbls = extract_features(model, tr_loader, args.device)
         te_feats, te_lbls = extract_features(model, te_loader, args.device)
-
         all_train_feats.append(tr_feats)
         all_train_labels.append(tr_lbls + offset)
         all_test_feats.append(te_feats)
         all_test_labels.append(te_lbls + offset)
-        dataset_slices.append((test_offset, test_offset + te_feats.shape[0]))
-        all_class_names.extend(c_names)
+        ds_slices.append((test_offset, test_offset + te_feats.shape[0]))
+        all_cn.extend(c_names)
         offset += len(c_names)
         test_offset += te_feats.shape[0]
+        logging.info(f"  {d_name}: train={tr_feats.shape[0]}, test={te_feats.shape[0]}, classes={len(c_names)}")
 
-        logging.info(f"  {d_name}: train={tr_feats.shape[0]}, test={te_feats.shape[0]}, "
-                     f"classes={len(c_names)}, test_slice=({dataset_slices[-1][0]}, {dataset_slices[-1][1]})")
-
-    train_feats = torch.cat(all_train_feats)
-    train_labels = torch.cat(all_train_labels)
+    train_feats_raw = torch.cat(all_train_feats)
+    train_labels_cpu = torch.cat(all_train_labels)
     test_feats = torch.cat(all_test_feats)
     test_labels = torch.cat(all_test_labels)
-    num_id_classes = len(all_class_names)
-    n_datasets = len(args.id_datasets)
+    num_id_classes = len(all_cn)
 
-    train_feats_norm = (train_feats / train_feats.norm(dim=-1, keepdim=True)).to(args.device)
+    train_feats_norm = (train_feats_raw / train_feats_raw.norm(dim=-1, keepdim=True)).to(args.device)
     test_feats_norm = (test_feats / test_feats.norm(dim=-1, keepdim=True)).to(args.device)
-    train_labels = train_labels.to(args.device)
-    test_labels = test_labels.to(args.device)
+    train_labels_gpu = train_labels_cpu.to(args.device)
+    test_labels_gpu = test_labels.to(args.device)
 
-    logging.info("Building zero-shot classifier...")
-    zs_classifier = get_zeroshot_classifier(model, processor, all_class_names, args.device)
+    all_class_names[:] = all_cn
+    dataset_slices[:] = ds_slices
 
-    with torch.no_grad():
-        zs_test_logits = test_feats_norm @ zs_classifier
+    return (train_feats_norm, train_labels_gpu, train_feats_raw, train_labels_cpu,
+            test_feats_norm, test_labels_gpu, num_id_classes)
 
-    zs_per_ds = []
-    for start, end in dataset_slices:
-        zs_l = zs_test_logits[start:end]
-        zs_l_norm = zs_l - zs_l.max(dim=-1, keepdim=True).values
-        acc = zs_l_norm.argmax(dim=1).eq(test_labels[start:end]).float().mean().item() * 100
-        zs_per_ds.append(acc)
-    zs_avg = sum(zs_per_ds) / len(zs_per_ds)
-    logging.info(f"Zero-shot per-dataset avg: {zs_avg:.1f}%")
 
-    # ========== 构建 6 种配置 ==========
-    # 分析版共用一个分类器（真实特征构建，不微调）
-    logging.info("\nBuilding analytical classifier (shared for A & B)...")
-    analytical_classifier = build_rgda_classifier(
-        train_feats_norm.cpu(), train_labels.cpu(), args, num_centers=1, do_fit=False
-    )
-
-    configs = [
-        ("A: 1c analytical",       1, False, False),
-        ("B: 4c analytical",       4, False, False),
-        ("C: 1c fit(real)",        1, True,  False),
-        ("D: 4c fit(real)",        4, True,  False),
-        ("E: 1c fit(GMM)",         1, True,  True),
-        ("F: 4c fit(GMM)",         4, True,  True),
-    ]
-
-    alphas = torch.linspace(0, 1.0, args.n_alpha).tolist()
+def _build_and_eval_classifiers(args, branch_label, train_feats_norm, train_labels_gpu,
+                                 train_feats_raw, train_labels_cpu,
+                                 test_feats_norm, test_labels_gpu,
+                                 zs_test_logits, zs_cls, num_id_classes,
+                                 dataset_slices, zs_per_ds, zs_avg, configs, alphas):
+    """构建 6 种 RGDA 配置，逐数据集 forward，返回 results dict。"""
     results = {}
 
-    # 分析版：构建多中心版本
-    logging.info("\nBuilding B: 4-center analytical...")
+    logging.info("\nBuilding analytical classifier (shared for A & B)...")
+    analytical_classifier = build_rgda_classifier(
+        train_feats_norm.cpu(), train_labels_gpu.cpu(), args, num_centers=1, do_fit=False
+    )
+
+    logging.info("Building B: 4-center analytical...")
     stats_dict_b, center_means_b = build_multi_center_stats_dict(
-        train_feats_norm.cpu(), train_labels.cpu(), M=4
+        train_feats_norm.cpu(), train_labels_gpu.cpu(), M=4
     )
     per_dataset_covs_b = []
     off = 0
@@ -308,18 +277,17 @@ def main(args):
         global_cov=global_cov_b,
     )
 
-    # GMM 采样（E/F 共用）
-    logging.info("\nSampling GMM pseudo features...")
-    raw_train_feats = train_feats / train_feats.norm(dim=-1, keepdim=True)
+    logging.info("Sampling GMM pseudo features...")
+    raw_train_feats_norm = train_feats_raw / train_feats_raw.norm(dim=-1, keepdim=True)
     gmm_feats, gmm_labels = sample_gmm_features(
-        raw_train_feats, train_labels, num_id_classes,
+        raw_train_feats_norm, train_labels_cpu, num_id_classes,
         args.gmm_k, args.gaussian_samples_per_class, args.device
     )
     logging.info(f"GMM sampled: {gmm_feats.shape[0]} features for {num_id_classes} classes")
 
     for cfg_name, n_centers, do_fit, use_gmm in configs:
         logging.info(f"\n{'='*60}")
-        logging.info(f"Config: {cfg_name}")
+        logging.info(f"[{branch_label}] Config: {cfg_name}")
         logging.info(f"  centers={n_centers}, fit={do_fit}, gmm={use_gmm}")
 
         if cfg_name.startswith("A"):
@@ -328,60 +296,74 @@ def main(args):
             classifier = classifier_b
         else:
             fit_feats = gmm_feats if use_gmm else train_feats_norm
-            fit_labels_use = gmm_labels if use_gmm else train_labels
+            fit_labels_use = gmm_labels if use_gmm else train_labels_gpu
             classifier = build_rgda_classifier(
                 fit_feats.cpu(), fit_labels_use.cpu(), args, n_centers, do_fit
             )
 
+        # 逐数据集 forward（避免 OOM）
+        rgda_logits_list = []
+        rgda_per_ds = []
         with torch.no_grad():
-            rgda_test_logits = classifier.forward(test_feats_norm)
-
-            combined_logits = torch.cat([zs_test_logits, rgda_test_logits], dim=1)
-
-            # per-dataset RGDA accuracy
-            rgda_per_ds = []
             for start, end in dataset_slices:
-                rgda_l = rgda_test_logits[start:end]
+                batch = test_feats_norm[start:end]
+                rgda_l = classifier.forward(batch)
                 rgda_l_norm = rgda_l - rgda_l.max(dim=-1, keepdim=True).values
-                acc = rgda_l_norm.argmax(dim=1).eq(test_labels[start:end]).float().mean().item() * 100
+                acc = rgda_l_norm.argmax(dim=1).eq(test_labels_gpu[start:end]).float().mean().item() * 100
                 rgda_per_ds.append(acc)
-            rgda_avg = sum(rgda_per_ds) / len(rgda_per_ds)
+                rgda_logits_list.append(rgda_l.cpu())
+                del rgda_l, rgda_l_norm
+                torch.cuda.empty_cache()
 
-            # alpha sweep: weighted
-            sweep_w = alpha_sweep_per_dataset(
-                combined_logits, test_labels, dataset_slices,
-                num_id_classes, alphas, method="weighted"
+        rgda_test_logits = torch.cat(rgda_logits_list).to(args.device)
+        rgda_avg = sum(rgda_per_ds) / len(rgda_per_ds)
+
+        combined_logits = torch.cat([zs_test_logits, rgda_test_logits], dim=1)
+
+        sweep_w = alpha_sweep_per_dataset(
+            combined_logits, test_labels_gpu, dataset_slices,
+            num_id_classes, alphas, method="weighted"
+        )
+        best_w = max(sweep_w, key=lambda x: x[1])
+
+        sweep_ae = {}
+        best_ae = {}
+        for beta in args.beta_values:
+            sw = alpha_sweep_per_dataset(
+                combined_logits, test_labels_gpu, dataset_slices,
+                num_id_classes, alphas, method="additive_exp", beta=beta
             )
-            best_w = max(sweep_w, key=lambda x: x[1])
+            sweep_ae[beta] = sw
+            best_ae[beta] = max(sw, key=lambda x: x[1])
 
-            # alpha sweep: additive exp
-            sweep_ae = {}
-            best_ae = {}
-            for beta in args.beta_values:
-                sw = alpha_sweep_per_dataset(
-                    combined_logits, test_labels, dataset_slices,
-                    num_id_classes, alphas, method="additive_exp", beta=beta
-                )
-                sweep_ae[beta] = sw
-                best_ae[beta] = max(sw, key=lambda x: x[1])
+        rgda_stats = compute_logit_stats(rgda_test_logits, "RGDA")
 
-            rgda_stats = compute_logit_stats(rgda_test_logits, "RGDA")
+        results[cfg_name] = {
+            "rgda_avg": rgda_avg,
+            "rgda_per_ds": rgda_per_ds,
+            "weighted": {"sweep": sweep_w, "best": best_w},
+            "additive_exp": {"sweep": sweep_ae, "best": best_ae},
+            "rgda_stats": rgda_stats,
+        }
 
-            results[cfg_name] = {
-                "rgda_avg": rgda_avg,
-                "rgda_per_ds": rgda_per_ds,
-                "weighted": {"sweep": sweep_w, "best": best_w},
-                "additive_exp": {"sweep": sweep_ae, "best": best_ae},
-                "rgda_stats": rgda_stats,
-            }
+        del rgda_logits_list, rgda_test_logits, combined_logits
+        torch.cuda.empty_cache()
 
-    # ========== 输出结果 ==========
+    return results
+
+
+def _print_all_tables(branch_label, configs, results, zs_avg, zs_per_ds, zs_test_logits, args):
+    """输出实验 1-3 + 详细表格"""
+
+    def print_section(tag):
+        if branch_label:
+            print(f"\n{'=' * 120}")
+            print(f"=== {branch_label} — {tag} ===")
+            print(f"{'=' * 120}")
 
     # --- 实验 1 ---
-    print("\n" + "=" * 120)
-    print("实验 1：Alpha Sweep — 6 种 RGDA 配置（加权混合, per-dataset 平均准确率）")
-    print("=" * 120)
-    print(f"{'Config':<25s} | {'RGDA':>7s} | {'Best α':>8s} | {'Best Ens':>8s} | {'α=0.5':>8s} | {'ZS avg':>7s}")
+    print_section("实验 1")
+    print(f"\n{'Config':<25s} | {'RGDA':>7s} | {'Best α':>8s} | {'Best Ens':>8s} | {'α=0.5':>8s} | {'ZS avg':>7s}")
     print("-" * 120)
     for cfg_name, _, _, _ in configs:
         r = results[cfg_name]
@@ -392,10 +374,8 @@ def main(args):
         print(f"{cfg_name:<25s} | {r['rgda_avg']:>5.1f}%  | {best_a:>7.3f}  | {best_acc:>6.1f}%  | {acc_05:>6.1f}%  | {zs_avg:>5.1f}%")
 
     # --- 实验 2 ---
-    print("\n" + "=" * 120)
-    print("实验 2：Logit 分布统计")
-    print("=" * 120)
-    print(f"{'Config':<25s} | {'Classifier':>10s} | {'Entropy':>8s} | {'Margin':>8s} | {'Std':>8s} | {'Spread':>8s}")
+    print_section("实验 2")
+    print(f"\n{'Config':<25s} | {'Classifier':>10s} | {'Entropy':>8s} | {'Margin':>8s} | {'Std':>8s} | {'Spread':>8s}")
     print("-" * 120)
     print(f"{'ZS':<25s} | {'ZS':>10s} | {compute_logit_stats(zs_test_logits, 'ZS')['entropy']:>8.3f} | "
           f"{compute_logit_stats(zs_test_logits, 'ZS')['margin']:>8.4f} | "
@@ -406,10 +386,8 @@ def main(args):
         print(f"{cfg_name:<25s} | {s['name']:>10s} | {s['entropy']:>8.3f} | {s['margin']:>8.4f} | {s['std']:>8.4f} | {s['spread']:>8.2f}")
 
     # --- 实验 3 ---
-    print("\n" + "=" * 120)
-    print("实验 3：两种集成方式对比（per-dataset 平均准确率）")
-    print("=" * 120)
-    print(f"{'Config':<25s} | {'Method':<25s} | {'Best α':>8s} | {'Best Acc':>8s} | {'α=0.5':>8s}")
+    print_section("实验 3")
+    print(f"\n{'Config':<25s} | {'Method':<25s} | {'Best α':>8s} | {'Best Acc':>8s} | {'α=0.5':>8s}")
     print("-" * 120)
     for cfg_name, _, _, _ in configs:
         r = results[cfg_name]
@@ -428,10 +406,8 @@ def main(args):
         print("-" * 120)
 
     # --- 详细 Alpha Sweep ---
-    print("\n" + "=" * 120)
-    print("详细 Alpha Sweep（加权混合, per-dataset 平均准确率）")
-    print("=" * 120)
-    header = f"{'Alpha':>8s}"
+    print_section("详细 Alpha Sweep")
+    header = f"\n{'Alpha':>8s}"
     for cfg_name, _, _, _ in configs:
         header += f" | {cfg_name:>18s}"
     print(header)
@@ -448,11 +424,9 @@ def main(args):
             row += f" | {acc:>16.1f}%"
         print(row)
 
-    # --- Per-dataset 详细表（最佳配置） ---
-    print("\n" + "=" * 120)
-    print("Per-dataset 详细准确率（加权混合, α=best）")
-    print("=" * 120)
-    header2 = f"{'Dataset':<15s} | {'ZS':>7s}"
+    # --- Per-dataset 详细表 ---
+    print_section("Per-dataset 详细准确率")
+    header2 = f"\n{'Dataset':<15s} | {'ZS':>7s}"
     for cfg_name, _, _, _ in configs:
         header2 += f" | {cfg_name:>14s}"
     print(header2)
@@ -470,9 +444,7 @@ def main(args):
     print(row_avg)
 
     # --- 最佳加法+指数变换 ---
-    print("\n" + "=" * 120)
-    print("最佳加法+指数变换配置")
-    print("=" * 120)
+    print_section("最佳加法+指数变换配置")
     for cfg_name, _, _, _ in configs:
         r = results[cfg_name]
         best_beta = None
@@ -484,6 +456,109 @@ def main(args):
                 best_beta = beta
         ba, bac = r["additive_exp"]["best"][best_beta]
         print(f"{cfg_name:<25s} | β={best_beta:.1f}, α={ba:.3f}, Acc={bac:.1f}%")
+
+
+def main(args):
+    fix_random_seed(args.seed)
+    logging.info(f"Device: {args.device}")
+
+    logging.info("Loading CLIP model (frozen)...")
+    dummy_args = argparse.Namespace(
+        lora_type='lora_vanilla', lora_rank=4,
+        tune_vision_encoder=False, tune_text_encoder=False
+    )
+    model, processor = get_clip_model(dummy_args, train_mode='frozen')
+    model = model.to(args.device)
+    model.eval()
+
+    all_class_names = []
+    dataset_slices = []
+
+    configs = [
+        ("A: 1c analytical",       1, False, False),
+        ("B: 4c analytical",       4, False, False),
+        ("C: 1c fit(real)",        1, True,  False),
+        ("D: 4c fit(real)",        4, True,  False),
+        ("E: 1c fit(GMM)",         1, True,  True),
+        ("F: 4c fit(GMM)",         4, True,  True),
+    ]
+    alphas = torch.linspace(0, 1.0, args.n_alpha).tolist()
+
+    branches = [
+        ("train_transform", False),
+        ("test_transform", True),
+    ]
+
+    zs_classifier = None
+    zs_test_logits = None
+    zs_per_ds = None
+    zs_avg = None
+    test_feats_shared = None
+    test_labels_shared = None
+    num_id_classes = None
+
+    all_branch_results = {}
+
+    for branch_label, use_test_transform in branches:
+        logging.info(f"\n{'#'*60}")
+        logging.info(f"Branch: {branch_label}")
+        logging.info(f"{'#'*60}")
+
+        (train_feats_norm, train_labels_gpu, train_feats_raw, train_labels_cpu,
+         test_feats_norm, test_labels_gpu, ncid) = _extract_features_for_branch(
+            model, args, all_class_names, dataset_slices, use_test_transform
+        )
+        num_id_classes = ncid
+
+        if zs_classifier is None:
+            zs_classifier = get_zeroshot_classifier(model, processor, all_class_names, args.device)
+            test_feats_shared = test_feats_norm
+            test_labels_shared = test_labels_gpu
+
+            with torch.no_grad():
+                zs_test_logits = test_feats_norm @ zs_classifier
+
+            zs_per_ds = []
+            for start, end in dataset_slices:
+                zs_l = zs_test_logits[start:end]
+                zs_l_norm = zs_l - zs_l.max(dim=-1, keepdim=True).values
+                acc = zs_l_norm.argmax(dim=1).eq(test_labels_gpu[start:end]).float().mean().item() * 100
+                zs_per_ds.append(acc)
+            zs_avg = sum(zs_per_ds) / len(zs_per_ds)
+            logging.info(f"Zero-shot per-dataset avg: {zs_avg:.1f}%")
+        else:
+            test_feats_norm = test_feats_shared
+            test_labels_gpu = test_labels_shared
+
+        branch_results = _build_and_eval_classifiers(
+            args, branch_label, train_feats_norm, train_labels_gpu,
+            train_feats_raw, train_labels_cpu,
+            test_feats_norm, test_labels_gpu, zs_test_logits, zs_classifier,
+            num_id_classes, dataset_slices, zs_per_ds, zs_avg, configs, alphas
+        )
+        all_branch_results[branch_label] = branch_results
+
+        _print_all_tables(branch_label, configs, branch_results, zs_avg, zs_per_ds, zs_test_logits, args)
+
+        del train_feats_norm, train_labels_gpu, train_feats_raw, train_labels_cpu
+        if use_test_transform:
+            del test_feats_norm, test_labels_gpu
+        if len(all_branch_results) < 2:
+            del test_feats_shared, test_labels_shared, test_feats_norm, test_labels_gpu
+        torch.cuda.empty_cache()
+
+    # ========== 最终对比总结 ==========
+    print("\n\n" + "=" * 120)
+    print("=== 双分支对比总结 ===")
+    print("=" * 120)
+    print(f"\n{'Config':<25s} | {'RGDA(train_t)':>13s} | {'RGDA(test_t)':>13s} | {'Diff':>8s}")
+    print("-" * 75)
+    train_r = all_branch_results.get("train_transform", {})
+    test_r = all_branch_results.get("test_transform", {})
+    for cfg_name, _, _, _ in configs:
+        tv = train_r.get(cfg_name, {}).get("rgda_avg", 0)
+        sv = test_r.get(cfg_name, {}).get("rgda_avg", 0)
+        print(f"{cfg_name:<25s} | {tv:>11.1f}%  | {sv:>12.1f}%  | {sv-tv:>+7.1f}%")
 
 
 if __name__ == "__main__":
