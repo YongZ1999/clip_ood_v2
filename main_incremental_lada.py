@@ -115,9 +115,31 @@ def parse_args():
                         help="DPT 每类 GMM 分量数")
     parser.add_argument("--image_prototypes_weight_coef", type=float, default=64.0,
                         help="DPT 原型损失权重系数")
+    parser.add_argument("--lada_official_mode", action='store_true', default=False,
+                        help="对齐官方 LADA：冻结视觉编码器、确定性原型、训练时直接相加 logits")
+    parser.add_argument("--lada_replay_mode", type=str, default=None,
+                        choices=["none", "mean", "dpt"],
+                        help="旧类回放消融：none / GMM均值 / 官方DPT噪声增强")
+    parser.add_argument("--dpt_feature_normalize", type=lambda x: x.lower() == 'true',
+                        default=None,
+                        help="GMM 拟合前是否 L2 归一化；默认 True")
 
     args = parser.parse_args()
     args.dataset_sequence = [[d] for d in args.dataset_sequence]
+
+    if args.lada_replay_mode is None:
+        args.lada_replay_mode = "dpt" if args.enable_dpt else "none"
+    args.enable_dpt = args.lada_replay_mode != "none"
+
+    if args.lada_official_mode:
+        args.tune_vision_encoder = False
+        args.tune_text_encoder = True
+        args.lora_type = "lora_vanilla"
+        args.init_mode = "lora_vanilla"
+        if args.dpt_feature_normalize is None:
+            args.dpt_feature_normalize = True
+    elif args.dpt_feature_normalize is None:
+        args.dpt_feature_normalize = True
 
     if args.device is None:
         args.device = f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu"
@@ -183,8 +205,11 @@ def main(args):
     model = trainer.model
     processor = trainer.processor
 
-    reference_loader = load_reference_dataset(args, trainer.model_pretrain,
-                                               processor, args.device)
+    if args.lada_official_mode:
+        reference_loader = None
+    else:
+        reference_loader = load_reference_dataset(args, trainer.model_pretrain,
+                                                   processor, args.device)
 
     global_class_names = []
     for task_datasets in args.dataset_sequence:
@@ -211,20 +236,26 @@ def main(args):
         print("=" * 50)
 
         train_loaders = []
+        update_loaders = []
         task_class_names = []
         for d_name in task_datasets:
             train_transform, test_transform = get_transforms(d_name)
-            tr_loader, _, _, c_names = get_xtail_trainloader(
+            tr_loader, update_loader, _, c_names = get_xtail_trainloader(
                 root=args.root, dataset_name=d_name,
                 transform_train=train_transform, transform_test=test_transform,
                 num_shots=args.num_shots, batch_size=args.batch_size
             )
             train_loaders.append(tr_loader)
+            update_loaders.append(update_loader)
             task_class_names.extend(c_names)
 
         merged_dataset = ConcatDataset([loader.dataset for loader in train_loaders])
+        update_dataset = ConcatDataset([loader.dataset for loader in update_loaders])
         cov_loader = DataLoader(merged_dataset, batch_size=args.batch_size, shuffle=False)
         merged_loader = DataLoader(merged_dataset, batch_size=args.batch_size, shuffle=True)
+        prototype_loader = DataLoader(
+            update_dataset, batch_size=args.batch_size, shuffle=False,
+            num_workers=args.num_workers, pin_memory=True)
 
         label_offset = sum(len(c_names) for c_names in history_class_names)
         current_all_class_names = []
@@ -248,7 +279,10 @@ def main(args):
         model = trainer.train(merged_loader, task_class_names, reference_loader,
                               aux_weight=args.aux_weight,
                               label_offset=label_offset,
-                              all_class_names=current_all_class_names)
+                              all_class_names=current_all_class_names,
+                              prototype_loader=(
+                                  prototype_loader if args.lada_official_mode
+                                  else merged_loader))
 
         if args.init_mode == "lora_nsp":
             print("\n=== Applying Null-Space Projection (NSP) ===")
@@ -272,19 +306,22 @@ def main(args):
             trainer.finalize_task_for_incremental()
 
         print("\n=== Finalizing LADA Task ===")
-        trainer.finalize_lada_task(cov_loader, task_class_names, label_offset)
+        trainer.finalize_lada_task(
+            prototype_loader if args.lada_official_mode else cov_loader,
+            task_class_names, label_offset)
 
         task_features = []
         task_labels = []
 
         for d_name in task_datasets:
             train_transform, test_transform = get_transforms(d_name)
-            tr_loader, _, _, c_names = get_xtail_trainloader(
+            tr_loader, update_loader, _, c_names = get_xtail_trainloader(
                 root=args.root, dataset_name=d_name,
                 transform_train=train_transform, transform_test=test_transform,
                 num_shots=args.num_shots, batch_size=args.batch_size
             )
-            features, labels = trainer._extract_features_manual(tr_loader)
+            feature_loader = update_loader if args.lada_official_mode else tr_loader
+            features, labels = trainer._extract_features_manual(feature_loader)
             task_features.append(features)
             task_labels.append(labels + label_offset)
 

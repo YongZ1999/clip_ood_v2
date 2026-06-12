@@ -109,7 +109,7 @@ class DPTManager:
         ], dim=0)
         logging.info(f"DPT text prototypes updated: {self.text_prototypes.shape[0]} total")
 
-    def sample_prototypes(self, device, k=1):
+    def sample_prototypes(self, device, k=1, add_noise=True):
         """
         从 GMM 采样幻影数据
 
@@ -118,6 +118,7 @@ class DPTManager:
         Args:
             device: 目标设备
             k: 每个 GMM 分量采样的数量
+            add_noise: True 使用论文 DPT 增强；False 仅回放 GMM 均值
 
         Returns:
             prototypes: (N_proto * k, D) 增强后的原型特征
@@ -134,10 +135,13 @@ class DPTManager:
 
         n_components, n_features = means.shape
 
-        stds = torch.sqrt(covs).unsqueeze(1).repeat(1, k).reshape(-1, 1)
         repeated_means = means.unsqueeze(1).repeat(1, k, 1).reshape(-1, n_features)
-        noise = torch.randn(n_components * k, n_features, device=device)
-        generated_samples = repeated_means + stds * noise
+        if add_noise:
+            stds = torch.sqrt(covs).unsqueeze(1).repeat(1, k).reshape(-1, 1)
+            noise = torch.randn(n_components * k, n_features, device=device)
+            generated_samples = repeated_means + stds * noise
+        else:
+            generated_samples = repeated_means
 
         weights_per_sample = (weights / k).repeat_interleave(k)
         labels_per_sample = labels.repeat_interleave(k)

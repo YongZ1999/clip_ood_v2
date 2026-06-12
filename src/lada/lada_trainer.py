@@ -66,23 +66,33 @@ class LADATrainer(LoRANSPTrainer):
 
         self.lada_alpha = getattr(args, 'lada_alpha', 1.0)
         self.lada_k = getattr(args, 'lada_k', 16)
-        self.enable_dpt = getattr(args, 'enable_dpt', False)
+        self.replay_mode = getattr(
+            args, 'lada_replay_mode',
+            'dpt' if getattr(args, 'enable_dpt', False) else 'none'
+        )
+        self.enable_dpt = self.replay_mode != 'none'
+        self.official_mode = getattr(args, 'lada_official_mode', False)
+        self.dpt_feature_normalize = getattr(args, 'dpt_feature_normalize', True)
         self.image_prototypes_weight_coef = getattr(args, 'image_prototypes_weight_coef', 64.0)
+        logging.info(
+            "LADA replay configuration: mode=%s, official_mode=%s, normalize_gmm_features=%s",
+            self.replay_mode, self.official_mode, self.dpt_feature_normalize)
 
     @torch.no_grad()
-    def _extract_features_manual(self, dataloader):
+    def _extract_features_manual(self, dataloader, normalize=True):
         self.model.eval()
         all_features = []
         all_labels = []
         for images, lbls in tqdm(dataloader, desc="Extracting features"):
             images = images.to(self.device)
             feats = self.model.get_image_features(images)
-            feats = feats / feats.norm(dim=-1, keepdim=True)
+            if normalize:
+                feats = feats / feats.norm(dim=-1, keepdim=True)
             all_features.append(feats.cpu())
             all_labels.append(lbls)
         return torch.cat(all_features), torch.cat(all_labels)
 
-    def build_lada_from_loader(self, train_loader, label_offset=0):
+    def build_lada_from_loader(self, prototype_loader, label_offset=0):
         """
         从训练数据加载器构建 LADA features
 
@@ -91,7 +101,7 @@ class LADATrainer(LoRANSPTrainer):
         3. 构建 curr_lada_features 和 joint_classifier
         """
         logging.info("=== Building LADA features from training data ===")
-        features, labels = self._extract_features_manual(train_loader)
+        features, labels = self._extract_features_manual(prototype_loader, normalize=True)
         features = features.to(self.device)
         labels = labels.to(self.device)
 
@@ -100,7 +110,8 @@ class LADATrainer(LoRANSPTrainer):
         return features, labels
 
     def train(self, train_loader, class_names, reference_loader=None,
-              aux_weight=0.0, label_offset=0, all_class_names=None):
+              aux_weight=0.0, label_offset=0, all_class_names=None,
+              prototype_loader=None):
         """
         LADA 训练循环
 
@@ -111,6 +122,7 @@ class LADATrainer(LoRANSPTrainer):
             aux_weight: 辅助分类头权重（不使用，保持接口兼容）
             label_offset: 当前任务在全局标签空间的偏移量
             all_class_names: 所有已见类名列表（含当前任务）
+            prototype_loader: 用确定性变换提取 LADA 初始化特征的 loader
         """
         import random as _random
 
@@ -121,7 +133,9 @@ class LADATrainer(LoRANSPTrainer):
         templates = [lambda x: f"a photo of a {x}."]
         max_zs_classes = getattr(self.args, 'max_zs_classes', 128)
 
-        features, labels = self.build_lada_from_loader(train_loader, label_offset=0)
+        if prototype_loader is None:
+            prototype_loader = train_loader
+        features, labels = self.build_lada_from_loader(prototype_loader, label_offset=0)
 
         if not self.has_text_lora:
             if all_class_names is not None:
@@ -168,14 +182,16 @@ class LADATrainer(LoRANSPTrainer):
             images = images.to(self.device)
             batch_labels = batch_labels.to(self.device)
 
-            img_feats = self.model.get_image_features(images)
+            vision_ctx = torch.no_grad() if not self.has_vision_lora else torch.enable_grad()
+            with vision_ctx:
+                img_feats = self.model.get_image_features(images)
             img_feats = img_feats / img_feats.norm(dim=-1, keepdim=True)
 
             shifted_labels = batch_labels + c_prev
 
             if self.enable_dpt and self.dpt.has_prototypes():
                 phantom_feats, phantom_labels, phantom_weights = self.dpt.sample_prototypes(
-                    self.device)
+                    self.device, add_noise=(self.replay_mode == 'dpt'))
                 all_feats = torch.cat([phantom_feats.detach(), img_feats], dim=0)
                 all_labels = torch.cat([phantom_labels, shifted_labels], dim=0)
                 real_weights = torch.ones(images.shape[0], device=self.device)
@@ -235,10 +251,13 @@ class LADATrainer(LoRANSPTrainer):
 
             lada_logits = self.lada_classifier(all_feats)
 
-            text_preds = text_logits.argmax(dim=1)
-            lada_classes = lada_logits.shape[1]
-            mask = (text_preds < lada_classes).float().unsqueeze(1)
-            total_logits = text_logits + mask * self.lada_alpha * lada_logits
+            if self.official_mode:
+                total_logits = text_logits + self.lada_alpha * lada_logits
+            else:
+                text_preds = text_logits.argmax(dim=1)
+                lada_classes = lada_logits.shape[1]
+                mask = (text_preds < lada_classes).float().unsqueeze(1)
+                total_logits = text_logits + mask * self.lada_alpha * lada_logits
 
             loss = weighted_cross_entropy(total_logits, all_labels_for_text, all_weights)
 
@@ -271,7 +290,7 @@ class LADATrainer(LoRANSPTrainer):
         self.lada_classifier.eval()
         return self.model
 
-    def finalize_lada_task(self, train_loader, class_names, label_offset):
+    def finalize_lada_task(self, prototype_loader, class_names, label_offset):
         """
         任务结束处理：
         1. 冻结 LADA 特征
@@ -283,16 +302,17 @@ class LADATrainer(LoRANSPTrainer):
         self.lada_classifier.finalize_task()
 
         if self.enable_dpt:
-            features, labels = self._extract_features_manual(train_loader)
+            features, labels = self._extract_features_manual(
+                prototype_loader, normalize=self.dpt_feature_normalize)
             features = features.to(self.device)
             labels = labels.to(self.device)
             self.dpt.update_image_prototypes(features, labels, label_offset,
                                              k=self.dpt.prototype_k)
 
-            templates = [lambda x: f"a photo of a {x}."]
-            text_feats = self.zeroshot_classifier(class_names, templates)
-            text_feats = text_feats.t()
-            self.dpt.update_text_prototypes(text_feats)
+        templates = [lambda x: f"a photo of a {x}."]
+        text_feats = self.zeroshot_classifier(class_names, templates)
+        text_feats = text_feats.t()
+        self.dpt.update_text_prototypes(text_feats)
 
     def get_lada_state(self):
         """保存 LADA 状态"""
