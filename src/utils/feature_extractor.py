@@ -2,7 +2,7 @@ import torch
 from tqdm import tqdm
 
 @torch.no_grad()
-def extract_features(model, dataloader, device):
+def extract_features(model, dataloader, device, normalize=True):
     """
     从数据加载器中提取特征
     Args:
@@ -25,7 +25,8 @@ def extract_features(model, dataloader, device):
         else:
             pooled = vision_outputs[1]
         feats = model.visual_projection(pooled)
-        feats = feats / feats.norm(dim=-1, keepdim=True)
+        if normalize:
+            feats = torch.nn.functional.normalize(feats, dim=-1)
         features.append(feats.cpu())
         labels.append(lbls.cpu())
     

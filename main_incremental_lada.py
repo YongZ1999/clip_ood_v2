@@ -122,7 +122,7 @@ def parse_args():
                         help="旧类回放消融：none / GMM均值 / 官方DPT噪声增强")
     parser.add_argument("--dpt_feature_normalize", type=lambda x: x.lower() == 'true',
                         default=None,
-                        help="GMM 拟合前是否 L2 归一化；默认 True")
+                        help="GMM 拟合前是否 L2 归一化；官方 LADA 使用 False")
 
     args = parser.parse_args()
     args.dataset_sequence = [[d] for d in args.dataset_sequence]
@@ -136,10 +136,9 @@ def parse_args():
         args.tune_text_encoder = True
         args.lora_type = "lora_vanilla"
         args.init_mode = "lora_vanilla"
-        if args.dpt_feature_normalize is None:
-            args.dpt_feature_normalize = True
+        args.dpt_feature_normalize = False
     elif args.dpt_feature_normalize is None:
-        args.dpt_feature_normalize = True
+        args.dpt_feature_normalize = False
 
     if args.device is None:
         args.device = f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu"

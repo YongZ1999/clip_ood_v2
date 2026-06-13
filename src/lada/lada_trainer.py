@@ -72,7 +72,12 @@ class LADATrainer(LoRANSPTrainer):
         )
         self.enable_dpt = self.replay_mode != 'none'
         self.official_mode = getattr(args, 'lada_official_mode', False)
-        self.dpt_feature_normalize = getattr(args, 'dpt_feature_normalize', True)
+        self.dpt_feature_normalize = getattr(args, 'dpt_feature_normalize', False)
+        if self.official_mode and self.dpt_feature_normalize:
+            logging.warning(
+                "Official LADA fits DPT GMMs in unnormalized CLIP embedding space; "
+                "overriding dpt_feature_normalize=True to False.")
+            self.dpt_feature_normalize = False
         self.image_prototypes_weight_coef = getattr(args, 'image_prototypes_weight_coef', 64.0)
         logging.info(
             "LADA replay configuration: mode=%s, official_mode=%s, normalize_gmm_features=%s",
@@ -184,15 +189,16 @@ class LADATrainer(LoRANSPTrainer):
 
             vision_ctx = torch.no_grad() if not self.has_vision_lora else torch.enable_grad()
             with vision_ctx:
-                img_feats = self.model.get_image_features(images)
-            img_feats = img_feats / img_feats.norm(dim=-1, keepdim=True)
+                raw_img_feats = self.model.get_image_features(images)
 
             shifted_labels = batch_labels + c_prev
 
             if self.enable_dpt and self.dpt.has_prototypes():
                 phantom_feats, phantom_labels, phantom_weights = self.dpt.sample_prototypes(
                     self.device, add_noise=(self.replay_mode == 'dpt'))
-                all_feats = torch.cat([phantom_feats.detach(), img_feats], dim=0)
+                # DPT replay and current features share the raw CLIP embedding
+                # space. Normalize them together before text/LADA classification.
+                all_feats = torch.cat([phantom_feats.detach(), raw_img_feats], dim=0)
                 all_labels = torch.cat([phantom_labels, shifted_labels], dim=0)
                 real_weights = torch.ones(images.shape[0], device=self.device)
                 all_weights = torch.cat([
@@ -200,9 +206,10 @@ class LADATrainer(LoRANSPTrainer):
                     real_weights
                 ], dim=0)
             else:
-                all_feats = img_feats
+                all_feats = raw_img_feats
                 all_labels = shifted_labels
                 all_weights = None
+            all_feats = F.normalize(all_feats, dim=-1)
 
             if self.has_text_lora:
                 if n_classes > max_zs_classes:

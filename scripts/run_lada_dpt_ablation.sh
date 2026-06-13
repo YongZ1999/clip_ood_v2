@@ -19,7 +19,7 @@ COMMON_ARGS=(
   --lada_k 16
   --prototype_k 4
   --lada_alpha 1.0
-  --image_prototypes_weight_coef 1.0
+  --image_prototypes_weight_coef 64.0
   --lada_official_mode
 )
 

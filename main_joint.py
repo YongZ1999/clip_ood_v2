@@ -183,6 +183,16 @@ def parse_args():
     parser.add_argument("--gmm_cov_type", type=str, default="spherical",
                         choices=["spherical", "rank1"],
                         help="GMM 协方差类型（spherical=标量, rank1=球面基+秩1主成分）。")
+    parser.add_argument("--gmm_fit_space", type=str, default="raw",
+                        choices=["raw", "sphere"],
+                        help="GMM 拟合空间。raw 对齐官方 LADA；sphere 仅用于错误实现对照。")
+    parser.add_argument("--gmm_sample_mode", type=str, default="sample",
+                        choices=["sample", "mean"],
+                        help="GMM 回放方式：sample=按协方差采样，mean=仅重复分量均值。")
+    parser.add_argument("--experiment_name", type=str, default=None,
+                        help="实验名称，写入结果 JSON 并用于输出文件名。")
+    parser.add_argument("--output_dir", type=str, default="experiments/joint_classifier_replay",
+                        help="结果 JSON 输出目录。")
 
     # 高斯采样正则化参数（独立于分类器构建参数）
     parser.add_argument("--sample_alpha1", type=float, default=None,
@@ -247,9 +257,10 @@ def main(args):
                 num_shots=args.num_shots, batch_size=args.batch_size
             )
             from src.utils.feature_extractor import extract_features
-            features, labels = extract_features(eval_model, tr_loader, args.device)
-            all_raw_feats.append(features.clone())  # 未归一化
-            features = features / features.norm(dim=-1, keepdim=True)
+            raw_features, labels = extract_features(
+                eval_model, tr_loader, args.device, normalize=False)
+            features = torch.nn.functional.normalize(raw_features, dim=-1)
+            all_raw_feats.append(raw_features)
             all_feats.append(features)
             all_lbls.append(labels + feat_offset)
             feat_offset += len(c_names)
@@ -257,10 +268,6 @@ def main(args):
         all_features = torch.cat(all_feats)
         all_raw_features = torch.cat(all_raw_feats)  # 用于 GMM 拟合
         all_labels = torch.cat(all_lbls)
-
-        stats_dict, center_means = build_multi_center_stats_dict(
-            all_features, all_labels, M=args.num_centers
-        )
 
         # 原始空间 stats_dict（用于高斯采样，协方差有意义的量级）
         raw_stats_dict, _ = build_multi_center_stats_dict(
@@ -278,47 +285,26 @@ def main(args):
             feat_offset += n_classes
         raw_global_cov = sum(raw_per_dataset_covs) / len(raw_per_dataset_covs)
 
-        # 计算数据集等权的全局协方差（避免类别多的数据集主导 Σ_global）
-        feat_offset = 0
-        per_dataset_covs = []
-        for d_name in args.id_datasets:
-            c_names = get_xtail_classnames(args.root, d_name, args.num_shots)
-            n_classes = len(c_names)
-            ds_cov = sum(stats_dict[cid].cov for cid in range(feat_offset, feat_offset + n_classes)) / n_classes
-            per_dataset_covs.append(ds_cov)
-            feat_offset += n_classes
-
-        dataset_balanced_global_cov = sum(per_dataset_covs) / len(per_dataset_covs)
-        logging.info(f"[Balanced Global Cov] Computed from {len(per_dataset_covs)} datasets, "
-                     f"each with equal weight ({per_dataset_covs[0].shape})")
-
-        lr_rgda_classifier = LRRGDAClassifier(
-            stats_dict=stats_dict, device=args.device,
-            rank=args.rgda_rank,
-            qda_reg_alpha1=args.rgda_alpha1,
-            qda_reg_alpha2=args.rgda_alpha2,
-            qda_reg_alpha3=args.rgda_alpha3,
-            temperature=1.0,
-            M=args.num_centers, center_means=center_means,
-            global_cov=dataset_balanced_global_cov,
-        )
-
         # 可选：用高斯分布采样伪特征替代真实特征
         if args.use_gaussian_features:
             if args.gmm_k > 0:
                 # ---- Spherical GMM 模式 ----
                 logging.info(f"Sampling ~{args.gaussian_samples_per_class} features per class "
-                             f"from spherical GMM (k={args.gmm_k})")
+                             f"from spherical GMM (k={args.gmm_k}, "
+                             f"fit_space={args.gmm_fit_space})")
                 from sklearn.mixture import GaussianMixture
                 import numpy as np
-                all_raw_features_np = all_raw_features.cpu().numpy()
+                gmm_fit_features = (
+                    all_raw_features if args.gmm_fit_space == "raw" else all_features
+                )
+                gmm_fit_features_np = gmm_fit_features.cpu().numpy()
                 all_labels_np = all_labels.cpu().numpy()
                 syn_feats = []
                 syn_labels = []
 
-                for cid in sorted(stats_dict.keys()):
+                for cid in sorted(torch.unique(all_labels).tolist()):
                     mask = all_labels_np == cid
-                    feats_c = all_raw_features_np[mask]  # 原始空间拟合 GMM
+                    feats_c = gmm_fit_features_np[mask]
 
                     if len(feats_c) < args.gmm_k:
                         # 样本太少，直接复制或降 k
@@ -367,15 +353,21 @@ def main(args):
                             mean = torch.from_numpy(gmm.means_[comp]).float()
                             var = gmm.covariances_[comp] + args.gmm_reg
                             n = max(1, int(n_per_comp[comp]))
-                            noise = torch.randn(n, mean.shape[0]) * np.sqrt(max(var, 1e-8))
-                            samples = mean.unsqueeze(0) + noise
+                            if args.gmm_sample_mode == "mean":
+                                samples = mean.unsqueeze(0).repeat(n, 1)
+                            else:
+                                noise = torch.randn(n, mean.shape[0]) * np.sqrt(max(var, 1e-8))
+                                samples = mean.unsqueeze(0) + noise
                             samples = samples / samples.norm(dim=-1, keepdim=True)
                             syn_feats.append(samples.to(args.device))
                             syn_labels.append(torch.full((samples.shape[0],), cid, device=args.device))
 
                 syn_features = torch.cat(syn_feats)
                 syn_labels_t = torch.cat(syn_labels)
-                logging.info(f"Generated {syn_features.shape[0]} features via {args.gmm_cov_type} GMM (k={args.gmm_k})")
+                logging.info(
+                    f"Generated {syn_features.shape[0]} features via {args.gmm_cov_type} "
+                    f"GMM (k={args.gmm_k}, fit_space={args.gmm_fit_space}, "
+                    f"sample_mode={args.gmm_sample_mode})")
             else:
                 # ---- 正则化高斯模式（原始空间估计 + 正则化 + 归一化）----
                 sa1 = args.sample_alpha1 if args.sample_alpha1 is not None else args.rgda_alpha1
@@ -412,6 +404,47 @@ def main(args):
         else:
             fit_features = all_features.to(args.device)
             fit_labels = all_labels.to(args.device)
+
+        # Both classifiers must be constructed from the same feature source.
+        # Under replay, this prevents LR-RGDA from retaining hidden access to
+        # real-feature centers and covariances while LADA uses pseudo features.
+        fit_features_cpu = fit_features.detach().cpu()
+        fit_labels_cpu = fit_labels.detach().cpu()
+        stats_dict, center_means = build_multi_center_stats_dict(
+            fit_features_cpu, fit_labels_cpu, M=args.num_centers
+        )
+
+        feat_offset = 0
+        per_dataset_covs = []
+        for d_name in args.id_datasets:
+            c_names = get_xtail_classnames(args.root, d_name, args.num_shots)
+            n_classes = len(c_names)
+            ds_cov = sum(
+                stats_dict[cid].cov
+                for cid in range(feat_offset, feat_offset + n_classes)
+            ) / n_classes
+            per_dataset_covs.append(ds_cov)
+            feat_offset += n_classes
+        dataset_balanced_global_cov = sum(per_dataset_covs) / len(per_dataset_covs)
+
+        source_name = (
+            f"gmm-{args.gmm_fit_space}" if args.use_gaussian_features else "real"
+        )
+        logging.info(
+            "[Classifier Source] %s features: n=%d, mean_norm=%.4f",
+            source_name, fit_features.shape[0],
+            fit_features.norm(dim=-1).mean().item())
+
+        lr_rgda_classifier = LRRGDAClassifier(
+            stats_dict=stats_dict, device=args.device,
+            rank=args.rgda_rank,
+            qda_reg_alpha1=args.rgda_alpha1,
+            qda_reg_alpha2=args.rgda_alpha2,
+            qda_reg_alpha3=args.rgda_alpha3,
+            temperature=1.0,
+            M=args.num_centers, center_means=center_means,
+            global_cov=dataset_balanced_global_cov,
+        )
 
         if args.rgda_train_iter > 0:
             logging.info(f"LR-RGDA fine-tuning: {args.rgda_train_iter} iters, lr={args.rgda_train_lr}")
@@ -769,6 +802,7 @@ def main(args):
     # ========== 8. 保存结果 JSON ==========
     save_results = {
         "mode": "Joint Fine-tuning",
+        "experiment_name": args.experiment_name,
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "arguments": vars(args),
         "id_datasets": list(args.id_datasets),
@@ -853,8 +887,10 @@ def main(args):
             }
         save_results["alpha_sensitivity"] = sens_data
 
-    os.makedirs("experiments", exist_ok=True)
-    save_path = f"experiments/joint_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    os.makedirs(args.output_dir, exist_ok=True)
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    result_stem = args.experiment_name or f"joint_results_{timestamp}"
+    save_path = os.path.join(args.output_dir, f"{result_stem}_seed{args.seed}.json")
     with open(save_path, 'w') as f:
         json.dump(save_results, f, indent=4)
     logging.info(f"\n联合微调结果已保存至: {save_path}")
