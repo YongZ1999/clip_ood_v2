@@ -146,13 +146,26 @@ def evaluate_dataset(args, d_name, model, zeroshot_classifier, lr_rgda_classifie
         # 4. Alpha 敏感性分析（可选，只在固定 α 模式下有意义）
         sensitivity_list = None
         if alpha_sensitivity and not use_adaptive:
-            sensitivity_list = []
+            lr_sensitivity = []
             for alpha in torch.linspace(0, 1.0, n_alpha_samples):
                 ens_logits = zs_logits_norm * (1 - alpha)
                 ens_logits[:, :current_num_classes] += alpha * rgda_logits_norm
                 ens_preds = ens_logits.argmax(dim=1)
                 ens_acc_alpha = ens_preds.eq(labels).float().mean().item() * 100
-                sensitivity_list.append((round(alpha.item(), 3), round(ens_acc_alpha, 2)))
+                lr_sensitivity.append((round(alpha.item(), 3), round(ens_acc_alpha, 2)))
+            if lada_classifier is not None:
+                lada_sensitivity = []
+                for alpha in torch.linspace(0, 1.0, n_alpha_samples):
+                    lada_zs_logits = (1 - alpha) * zs_logits_norm + alpha * lada_logits_norm
+                    lada_zs_preds = lada_zs_logits.argmax(dim=1)
+                    lada_acc_alpha = lada_zs_preds.eq(labels).float().mean().item() * 100
+                    lada_sensitivity.append((round(alpha.item(), 3), round(lada_acc_alpha, 2)))
+                sensitivity_list = {
+                    "lr": lr_sensitivity,
+                    "lada": lada_sensitivity,
+                }
+            else:
+                sensitivity_list = lr_sensitivity
 
     return zs_acc, rgda_acc, ens_acc, lada_acc, lada_zs_acc, len(c_names), sensitivity_list
 
@@ -160,7 +173,8 @@ def evaluate_dataset(args, d_name, model, zeroshot_classifier, lr_rgda_classifie
 def batch_evaluate_datasets(
     dataset_names, model, processor, zeroshot_classifier, lr_rgda_classifier,
     num_id_classes, args=None, root=None, num_shots=16, batch_size=32, device='cuda',
-    alpha=0.5, alpha_sensitivity=False, n_alpha_samples=21
+    alpha=0.5, alpha_sensitivity=False, n_alpha_samples=21,
+    lada_classifier=None, lada_alpha=1.0
 ):
     """
     批处理评估：先收集所有数据集的 feature 和 label 拼到一起，再统一评估。
@@ -181,6 +195,8 @@ def batch_evaluate_datasets(
         alpha: 集成权重
         alpha_sensitivity: 是否做 α 敏感性分析
         n_alpha_samples: α 采样点数
+        lada_classifier: 可选 LADA 分类器，用于同步扫描 LADA+ZS 系数
+        lada_alpha: LADA+ZS 固定集成权重
 
     Returns:
         {
@@ -190,12 +206,14 @@ def batch_evaluate_datasets(
         }
     """
     # 解析参数（兼容 args 对象和独立传参）
+    use_adaptive = False
     if args is not None:
         root = args.root
         num_shots = args.num_shots
         batch_size = args.batch_size
         device = args.device
         alpha = args.alpha
+        lada_alpha = getattr(args, 'lada_alpha', lada_alpha)
         use_adaptive = getattr(args, 'adaptive_ensemble', False)
 
     from utils_data import get_xtail_trainloader, get_transforms
@@ -216,55 +234,127 @@ def batch_evaluate_datasets(
         features, labels = extract_features(model, te_loader, device)
         features = features / features.norm(dim=-1, keepdim=True)
 
-        all_features.append(features)
-        all_labels.append(labels + offset)
+        all_features.append(features.cpu())
+        all_labels.append((labels + offset).cpu())
         offset += len(c_names)
 
-    all_features = torch.cat(all_features).to(device)
-    all_labels = torch.cat(all_labels).to(device)
+    all_features = torch.cat(all_features)
+    all_labels = torch.cat(all_labels)
 
     with torch.no_grad():
-        # Zero-shot logits（不乘 logit_scale，与 debug_classifier_router.py 一致）
-        zs_logits = all_features @ zeroshot_classifier
-        zs_logits_norm = zs_logits - zs_logits.max(dim=-1, keepdim=True).values
-        zs_preds = zs_logits_norm.argmax(dim=1)
-        zs_overall = zs_preds.eq(all_labels).float().mean().item() * 100
+        total = all_labels.numel()
+        eval_chunk_size = int(getattr(args, "alpha_sweep_batch_size", 512) or 512)
+        alpha_values = (
+            torch.linspace(0, 1.0, n_alpha_samples, device=device)
+            if alpha_sensitivity and not use_adaptive
+            else None
+        )
+        zs_correct = 0
+        rgda_correct = 0
+        ens_correct = 0
+        lada_overall = None
+        lada_zs_overall = None
+        lada_sensitivity = None
+        lada_correct = 0
+        lada_zs_correct = 0
+        sensitivity_correct = (
+            [0 for _ in range(n_alpha_samples)]
+            if alpha_values is not None
+            else None
+        )
+        lada_sensitivity_correct = (
+            [0 for _ in range(n_alpha_samples)]
+            if alpha_values is not None and lada_classifier is not None
+            else None
+        )
 
-        # 2. LR-RGDA logits
-        rgda_logits = lr_rgda_classifier.forward(all_features)
-        rgda_logits_norm = rgda_logits - rgda_logits.max(dim=-1, keepdim=True).values
-        rgda_preds = rgda_logits_norm.argmax(dim=1)
-        rgda_overall = rgda_preds.eq(all_labels).float().mean().item() * 100
+        for start in range(0, total, eval_chunk_size):
+            end = min(start + eval_chunk_size, total)
+            features_chunk = all_features[start:end].to(device)
+            labels_chunk = all_labels[start:end].to(device)
 
-        # 3. Ensemble（固定 α 或自适应）
-        if use_adaptive:
-            zs_probs = F.softmax(zs_logits_norm, dim=-1)
-            rgda_probs = F.softmax(rgda_logits_norm, dim=-1)
-            zs_conf = zs_probs.max(dim=-1).values
-            rgda_conf = rgda_probs.max(dim=-1).values
-            alpha_sample = torch.sigmoid(rgda_conf - zs_conf).unsqueeze(-1)
-            ensemble_logits = (1 - alpha_sample) * zs_logits_norm
-            ensemble_logits[:, :num_id_classes] += alpha_sample * rgda_logits_norm
-        else:
-            ensemble_logits = zs_logits_norm * (1 - alpha)
-            ensemble_logits[:, :num_id_classes] += alpha * rgda_logits_norm
-        ens_preds = ensemble_logits.argmax(dim=1)
-        ens_overall = ens_preds.eq(all_labels).float().mean().item() * 100
+            # Zero-shot logits（不乘 logit_scale，与 debug_classifier_router.py 一致）
+            zs_logits = features_chunk @ zeroshot_classifier
+            zs_logits_norm = zs_logits - zs_logits.max(dim=-1, keepdim=True).values
+            zs_preds = zs_logits_norm.argmax(dim=1)
+            zs_correct += int(zs_preds.eq(labels_chunk).sum().item())
 
-        # 4. Alpha 敏感性分析（在合并特征上统一扫描，只在固定 α 模式下有意义）
+            # LR-RGDA logits. Keep this chunked: full-test LR-RGDA logits can exceed GPU memory.
+            rgda_logits = lr_rgda_classifier.forward(features_chunk)
+            rgda_logits_norm = rgda_logits - rgda_logits.max(dim=-1, keepdim=True).values
+            rgda_preds = rgda_logits_norm.argmax(dim=1)
+            rgda_correct += int(rgda_preds.eq(labels_chunk).sum().item())
+
+            if use_adaptive:
+                zs_probs = F.softmax(zs_logits_norm, dim=-1)
+                rgda_probs = F.softmax(rgda_logits_norm, dim=-1)
+                zs_conf = zs_probs.max(dim=-1).values
+                rgda_conf = rgda_probs.max(dim=-1).values
+                alpha_sample = torch.sigmoid(rgda_conf - zs_conf).unsqueeze(-1)
+                ensemble_logits = (1 - alpha_sample) * zs_logits_norm
+                ensemble_logits[:, :num_id_classes] += alpha_sample * rgda_logits_norm
+            else:
+                ensemble_logits = zs_logits_norm * (1 - alpha)
+                ensemble_logits[:, :num_id_classes] += alpha * rgda_logits_norm
+            ens_preds = ensemble_logits.argmax(dim=1)
+            ens_correct += int(ens_preds.eq(labels_chunk).sum().item())
+
+            lada_logits_norm = None
+            if lada_classifier is not None:
+                lada_logits = lada_classifier(features_chunk)
+                lada_logits_norm = lada_logits - lada_logits.max(dim=-1, keepdim=True).values
+                lada_preds = lada_logits_norm.argmax(dim=1)
+                lada_correct += int(lada_preds.eq(labels_chunk).sum().item())
+
+                lada_zs_logits = (1 - lada_alpha) * zs_logits_norm + lada_alpha * lada_logits_norm
+                lada_zs_preds = lada_zs_logits.argmax(dim=1)
+                lada_zs_correct += int(lada_zs_preds.eq(labels_chunk).sum().item())
+
+            if alpha_values is not None:
+                for idx, a in enumerate(alpha_values):
+                    ens_logits = zs_logits_norm * (1 - a)
+                    ens_logits[:, :num_id_classes] += a * rgda_logits_norm
+                    ens_preds = ens_logits.argmax(dim=1)
+                    sensitivity_correct[idx] += int(ens_preds.eq(labels_chunk).sum().item())
+
+                    if lada_logits_norm is not None:
+                        lada_zs_logits = (1 - a) * zs_logits_norm + a * lada_logits_norm
+                        lada_zs_preds = lada_zs_logits.argmax(dim=1)
+                        lada_sensitivity_correct[idx] += int(
+                            lada_zs_preds.eq(labels_chunk).sum().item()
+                        )
+
+        zs_overall = zs_correct / total * 100
+        rgda_overall = rgda_correct / total * 100
+        ens_overall = ens_correct / total * 100
+
+        if lada_classifier is not None:
+            lada_overall = lada_correct / total * 100
+            lada_zs_overall = lada_zs_correct / total * 100
+
         sensitivity = None
-        if alpha_sensitivity and not use_adaptive:
-            sensitivity = []
-            for a in torch.linspace(0, 1.0, n_alpha_samples):
-                ens_logits = zs_logits_norm * (1 - a)
-                ens_logits[:, :num_id_classes] += a * rgda_logits_norm
-                ens_preds = ens_logits.argmax(dim=1)
-                acc = ens_preds.eq(all_labels).float().mean().item() * 100
-                sensitivity.append((round(a.item(), 3), round(acc, 2)))
+        if alpha_values is not None:
+            sensitivity = [
+                (round(float(a.item()), 3), round(count / total * 100, 2))
+                for a, count in zip(alpha_values, sensitivity_correct)
+            ]
+            if lada_sensitivity_correct is not None:
+                lada_sensitivity = []
+                for a, count in zip(alpha_values, lada_sensitivity_correct):
+                    lada_sensitivity.append(
+                        (round(float(a.item()), 3), round(count / total * 100, 2))
+                    )
 
     return {
-        "overall": {"zs": zs_overall, "rgda": rgda_overall, "ens": ens_overall},
+        "overall": {
+            "zs": zs_overall,
+            "rgda": rgda_overall,
+            "ens": ens_overall,
+            "lada": lada_overall,
+            "lada_zs": lada_zs_overall,
+        },
         "sensitivity": sensitivity,
+        "lada_sensitivity": lada_sensitivity,
     }
 
 

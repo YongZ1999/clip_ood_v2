@@ -7,9 +7,26 @@ import os
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
+def _env_flag(name, default):
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.lower() in {"1", "true", "yes", "on"}
+
+
 def get_clip_model(args, train_mode="lora"):
-    model = CLIPModel.from_pretrained("openai/clip-vit-base-patch16", use_safetensors=True)
-    processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch16")
+    model_name = os.environ.get("CLIP_MODEL_NAME", "openai/clip-vit-base-patch16")
+    use_safetensors = _env_flag("CLIP_USE_SAFETENSORS", True)
+    local_files_only = _env_flag("CLIP_LOCAL_FILES_ONLY", False)
+    model = CLIPModel.from_pretrained(
+        model_name,
+        use_safetensors=use_safetensors,
+        local_files_only=local_files_only,
+    )
+    processor = CLIPProcessor.from_pretrained(
+        model_name,
+        local_files_only=local_files_only,
+    )
 
     if train_mode == "frozen":
         for p in model.parameters():

@@ -7,8 +7,8 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.optim.lr_scheduler import CosineAnnealingLR, _LRScheduler
 from torch.utils.data import DataLoader
-from models.clip import get_clip_model
-from models.utils import feature_distillation_loss, EMASmooth, cross_modal_distillation_loss
+from src.models.clip import get_clip_model
+from src.models.utils import feature_distillation_loss, EMASmooth, cross_modal_distillation_loss
 from tqdm import tqdm
 from utils_data import MergedReferenceDataset
 

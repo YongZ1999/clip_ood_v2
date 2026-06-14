@@ -18,9 +18,15 @@ def kmeans(x: torch.Tensor, M: int, n_iter: int = 20, seed: int = 42) -> torch.T
     Returns:
         centers: [M, D]
     """
-    if M >= x.size(0):
-        # M >= 样本数时，每个样本自身作为一个中心
-        return x
+    unique_x = torch.unique(x, dim=0)
+    if unique_x.size(0) <= M:
+        # Replay modes such as GMM-mean can contain repeated pseudo-features.
+        # Preserve the requested fixed center count for downstream tensors by
+        # cycling unique centers when there are fewer unique points than M.
+        if unique_x.size(0) == M:
+            return unique_x
+        repeat = (M + unique_x.size(0) - 1) // unique_x.size(0)
+        return unique_x.repeat((repeat, 1))[:M]
 
     N, D = x.shape
     # 使用局部 RNG 避免全局种子污染

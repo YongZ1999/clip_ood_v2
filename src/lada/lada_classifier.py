@@ -59,10 +59,14 @@ class LADAClassifier(nn.Module):
         for lbl in unique_labels:
             lbl_indices = np.where(labels_np == lbl)[0]
             lbl_features = features_np[lbl_indices]
+            unique_features = np.unique(lbl_features, axis=0)
 
-            actual_k = min(k, len(lbl_features))
-            kmeans = KMeans(n_clusters=actual_k, n_init=10, random_state=42).fit(lbl_features)
-            cluster_centers = kmeans.cluster_centers_
+            actual_k = min(k, len(unique_features))
+            if actual_k == len(unique_features):
+                cluster_centers = unique_features
+            else:
+                kmeans = KMeans(n_clusters=actual_k, n_init=10, random_state=42).fit(lbl_features)
+                cluster_centers = kmeans.cluster_centers_
 
             selected_features.append(cluster_centers)
             selected_labels.append(np.full(actual_k, lbl, dtype=labels_np.dtype))

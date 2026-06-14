@@ -150,6 +150,12 @@ def parse_args():
     parser.add_argument("--num_centers", type=int, default=1,
                         help="Number of centers per class for multi-center LR-RGDA.\n"
                              "1=standard single-center, >1=k-means multi-center.")
+    parser.add_argument("--classifier_feature_transform", type=str, default="train",
+                        choices=["train", "test"],
+                        help="Transform used to extract the 16-shot features for LR-RGDA/LADA "
+                             "construction and classifier-only fitting. train preserves the "
+                             "historical behavior with training augmentation; test uses the "
+                             "deterministic train_loader4updating path.")
 
     # LADA 分类器参数
     parser.add_argument("--enable_lada", action='store_true', default=False,
@@ -249,16 +255,26 @@ def main(args):
         all_lbls = []
         feat_offset = 0
 
+        logging.info(
+            "Classifier feature transform: %s",
+            args.classifier_feature_transform,
+        )
+
         for d_name in args.id_datasets:
-            train_transform, _ = get_transforms(d_name)
-            tr_loader, _, _, c_names = get_xtail_trainloader(
+            train_transform, test_transform = get_transforms(d_name)
+            tr_loader, tr_update_loader, _, c_names = get_xtail_trainloader(
                 root=args.root, dataset_name=d_name,
-                transform_train=train_transform, transform_test=None,
+                transform_train=train_transform, transform_test=test_transform,
                 num_shots=args.num_shots, batch_size=args.batch_size
+            )
+            feature_loader = (
+                tr_update_loader
+                if args.classifier_feature_transform == "test"
+                else tr_loader
             )
             from src.utils.feature_extractor import extract_features
             raw_features, labels = extract_features(
-                eval_model, tr_loader, args.device, normalize=False)
+                eval_model, feature_loader, args.device, normalize=False)
             features = torch.nn.functional.normalize(raw_features, dim=-1)
             all_raw_feats.append(raw_features)
             all_feats.append(features)
@@ -471,6 +487,8 @@ def main(args):
         logging.info(f"\n=== Evaluating ID Datasets {tag}===")
         id_zs, id_rgda, id_ens = [], [], []
         id_lada, id_lada_zs = [], []
+        id_alpha_sweeps = []
+        id_lada_alpha_sweeps = []
 
         id_dataset_offset_map = {}
         eval_offset = 0
@@ -481,9 +499,10 @@ def main(args):
 
         eval_offset = 0
         for d_name in args.id_datasets:
-            zs_acc, rgda_acc, ens_acc, lada_acc, lada_zs_acc, c_len, _ = evaluate_dataset(
+            zs_acc, rgda_acc, ens_acc, lada_acc, lada_zs_acc, c_len, sensitivity = evaluate_dataset(
                 args, d_name, eval_model, zs_classifier, lr_rgda_classifier,
                 num_id_classes, eval_offset,
+                alpha_sensitivity=args.alpha_sensitivity, n_alpha_samples=21,
                 lada_classifier=lada_classifier, lada_alpha=args.lada_alpha
             )
             id_zs.append(zs_acc)
@@ -492,6 +511,13 @@ def main(args):
             if lada_classifier is not None:
                 id_lada.append(lada_acc)
                 id_lada_zs.append(lada_zs_acc)
+            if args.alpha_sensitivity and sensitivity:
+                if isinstance(sensitivity, dict):
+                    id_alpha_sweeps.append(sensitivity["lr"])
+                    if sensitivity.get("lada") is not None:
+                        id_lada_alpha_sweeps.append(sensitivity["lada"])
+                else:
+                    id_alpha_sweeps.append(sensitivity)
             eval_offset += c_len
             log_str = f"[{tag} ID] {d_name:<12s} | ZS: {zs_acc:5.1f}% | " \
                       f"RGDA: {rgda_acc:5.1f}% | Ensemble: {ens_acc:5.1f}%"
@@ -504,6 +530,25 @@ def main(args):
         id_ens_avg = sum(id_ens) / len(id_ens)
         id_lada_avg = sum(id_lada) / len(id_lada) if id_lada else None
         id_lada_zs_avg = sum(id_lada_zs) / len(id_lada_zs) if id_lada_zs else None
+
+        def macro_average_sweeps(sweeps):
+            if not sweeps:
+                return []
+            averaged = []
+            for idx in range(len(sweeps[0])):
+                alpha = sweeps[0][idx][0]
+                values = [sweep[idx][1] for sweep in sweeps]
+                averaged.append((alpha, round(sum(values) / len(values), 2)))
+            return averaged
+
+        id_alpha_sensitivity = None
+        if args.alpha_sensitivity:
+            id_alpha_sensitivity = {
+                "average_type": "dataset_macro",
+                "sweep": macro_average_sweeps(id_alpha_sweeps),
+            }
+            if id_lada_alpha_sweeps:
+                id_alpha_sensitivity["lada_sweep"] = macro_average_sweeps(id_lada_alpha_sweeps)
 
         # 打印格式化总表（中间评估 + 最终评估共用）
         header = f"{'Dataset':<15s} | {'Zero-shot':>9s} | {'LR-RGDA':>9s} | {'Ensemble':>9s}"
@@ -528,7 +573,7 @@ def main(args):
         return (id_zs, id_rgda, id_ens, id_zs_avg, id_rgda_avg, id_ens_avg,
                 id_lada, id_lada_zs, id_lada_avg, id_lada_zs_avg,
                 id_dataset_offset_map, num_id_classes, zs_classifier,
-                lr_rgda_classifier, lada_classifier)
+                lr_rgda_classifier, lada_classifier, id_alpha_sensitivity)
 
     all_class_names = []
     if tune_student and args.iterations > 0:
@@ -614,7 +659,8 @@ def main(args):
          id_zs_avg, id_rgda_avg, id_ens_avg,
          id_lada_accs, id_lada_zs_accs, id_lada_avg, id_lada_zs_avg,
          id_dataset_offset, num_id_classes,
-         zeroshot_classifier, lr_rgda_classifier, lada_classifier) = run_full_evaluation(model, tag="Final")
+         zeroshot_classifier, lr_rgda_classifier, lada_classifier,
+         id_alpha_sensitivity) = run_full_evaluation(model, tag="Final")
 
     else:
         logging.info(f"\n=== Skipping Fine-tuning (tune_student={args.tune_student}, iterations={args.iterations}) ===")
@@ -626,7 +672,8 @@ def main(args):
          id_zs_avg, id_rgda_avg, id_ens_avg,
          id_lada_accs, id_lada_zs_accs, id_lada_avg, id_lada_zs_avg,
          id_dataset_offset, num_id_classes,
-         zeroshot_classifier, lr_rgda_classifier, lada_classifier) = run_full_evaluation(model, tag="No-tune")
+         zeroshot_classifier, lr_rgda_classifier, lada_classifier,
+         id_alpha_sensitivity) = run_full_evaluation(model, tag="No-tune")
 
     # ========== 4. 评估 OOD 数据集 ==========
     logging.info("\n=== Evaluating OOD Datasets (Ensemble with alpha=%.1f) ===" % args.alpha)
@@ -756,26 +803,20 @@ def main(args):
     print(total_row)
     print("=" * 110)
 
-    # ========== 7. Alpha 敏感性分析（批处理，如 debug_classifier_router.py）==========
-    if args.alpha_sensitivity:
+    # ========== 7. Alpha 敏感性分析（与主表一致的 dataset-macro 口径）==========
+    if args.alpha_sensitivity and id_alpha_sensitivity:
         print("\n" + "=" * 110)
-        print("[Alpha 敏感性分析] 所有 ID 数据集的 feature 拼在一起统一扫描")
+        print("[Alpha 敏感性分析] ID 数据集 macro-average 扫描")
         print("=" * 110)
 
-        id_result = batch_evaluate_datasets(
-            args.id_datasets, model, processor, zeroshot_classifier,
-            lr_rgda_classifier, num_id_classes, args=args,
-            alpha_sensitivity=True, n_alpha_samples=21
-        )
-
-        alphas = [s[0] for s in id_result["sensitivity"]]
-        accs = [s[1] for s in id_result["sensitivity"]]
+        alphas = [s[0] for s in id_alpha_sensitivity["sweep"]]
+        accs = [s[1] for s in id_alpha_sensitivity["sweep"]]
 
         # 找最佳 alpha
         best_idx = max(range(len(accs)), key=lambda i: accs[i])
         best_alpha, best_acc = alphas[best_idx], accs[best_idx]
 
-        print(f"{'Alpha':>10} | {'Overall Acc (ID合拼)':>20s}")
+        print(f"{'Alpha':>10} | {'Macro Acc (ID)':>20s}")
         print("-" * 40)
         for a, acc in zip(alphas, accs):
             marker = " ← best" if a == best_alpha else ""
@@ -783,21 +824,20 @@ def main(args):
         print("-" * 40)
         print(f"最佳 Alpha: {best_alpha:.2f}, 最高准确率: {best_acc:.2f}%")
 
-        # 同时也拼 OOD 做敏感性分析
-        if args.ood_datasets:
-            ood_result = batch_evaluate_datasets(
-                args.ood_datasets, model, processor, zeroshot_classifier,
-                lr_rgda_classifier, num_id_classes, args=args,
-                alpha_sensitivity=True, n_alpha_samples=21
-            )
-            ood_accs = [s[1] for s in ood_result["sensitivity"]]
-            best_ood_idx = max(range(len(ood_accs)), key=lambda i: ood_accs[i])
-            print(f"\n{'Alpha':>10} | {'Overall Acc (OOD合拼)':>20s}")
+        if has_lada and id_alpha_sensitivity.get("lada_sweep"):
+            lada_alphas = [s[0] for s in id_alpha_sensitivity["lada_sweep"]]
+            lada_accs = [s[1] for s in id_alpha_sensitivity["lada_sweep"]]
+            best_lada_idx = max(range(len(lada_accs)), key=lambda i: lada_accs[i])
+            print(f"\n{'Alpha':>10} | {'LADA+ZS Macro Acc':>20s}")
             print("-" * 40)
-            for a, acc in zip(alphas, ood_accs):
-                marker = " ← best" if a == alphas[best_ood_idx] else ""
+            for a, acc in zip(lada_alphas, lada_accs):
+                marker = " ← best" if a == lada_alphas[best_lada_idx] else ""
                 print(f"{a:10.2f} | {acc:18.2f}%{marker}")
             print("-" * 40)
+            print(
+                f"LADA+ZS 最佳 Alpha: {lada_alphas[best_lada_idx]:.2f}, "
+                f"最高准确率: {lada_accs[best_lada_idx]:.2f}%"
+            )
 
     # ========== 8. 保存结果 JSON ==========
     save_results = {
@@ -863,28 +903,17 @@ def main(args):
         save_results["metrics"]["total"]["average"]["lada_zs"] = total_lada_zs_avg
 
     # 如果有敏感性分析，追加保存
-    if args.alpha_sensitivity:
-        id_result = batch_evaluate_datasets(
-            args.id_datasets, model, processor, zeroshot_classifier,
-            lr_rgda_classifier, num_id_classes, args=args,
-            alpha_sensitivity=True, n_alpha_samples=21
-        )
+    if args.alpha_sensitivity and id_alpha_sensitivity:
         sens_data = {
             "id": {
-                "overall": id_result["overall"],
-                "sweep": [(a, acc) for a, acc in id_result["sensitivity"]],
+                "average_type": id_alpha_sensitivity.get("average_type", "dataset_macro"),
+                "sweep": [(a, acc) for a, acc in id_alpha_sensitivity["sweep"]],
             }
         }
-        if args.ood_datasets:
-            ood_result = batch_evaluate_datasets(
-                args.ood_datasets, model, processor, zeroshot_classifier,
-                lr_rgda_classifier, num_id_classes, args=args,
-                alpha_sensitivity=True, n_alpha_samples=21
-            )
-            sens_data["ood"] = {
-                "overall": ood_result["overall"],
-                "sweep": [(a, acc) for a, acc in ood_result["sensitivity"]],
-            }
+        if has_lada and id_alpha_sensitivity.get("lada_sweep"):
+            sens_data["id"]["lada_sweep"] = [
+                (a, acc) for a, acc in id_alpha_sensitivity["lada_sweep"]
+            ]
         save_results["alpha_sensitivity"] = sens_data
 
     os.makedirs(args.output_dir, exist_ok=True)

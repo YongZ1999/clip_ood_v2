@@ -8,8 +8,8 @@ import logging
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-from models.clip import get_clip_model
-from models.utils import feature_distillation_loss, cross_modal_distillation_loss
+from src.models.clip import get_clip_model
+from src.models.utils import feature_distillation_loss, cross_modal_distillation_loss
 
 
 def symmetric_cross_entropy_loss(logits, targets, sce_a=0.5, sce_b=0.5):
@@ -290,7 +290,8 @@ class LoRANSPTrainer:
         logging.info("Task finalized: LoRA weights merged and reset for enabled encoders.")
 
     def train(self, train_loader, class_names, reference_loader,
-              eval_interval=0, eval_callback=None, aux_weight=0.0):
+              eval_interval=0, eval_callback=None, aux_weight=0.0,
+              train_text_encoder=None, text_lr=None):
         """
         训练模型
 
@@ -304,33 +305,43 @@ class LoRANSPTrainer:
         templates = [lambda x: f"a photo of a {x}."]
         n_classes = len(class_names)
         max_zs_classes = getattr(self.args, 'max_zs_classes', 128)
+        train_text_encoder = self.has_text_lora if train_text_encoder is None else bool(train_text_encoder)
+        text_lr = self.args.lr if text_lr is None else float(text_lr)
+        text_grad_enabled = self.has_text_lora and train_text_encoder and text_lr > 0
 
-        if self.has_text_lora:
+        if self.has_text_lora and text_grad_enabled:
             precomputed_classifier = None
         else:
             precomputed_classifier = self.zeroshot_classifier(class_names, templates)
 
-        # 优化器：图像 + 文本 LoRA 参数
-        trainable_params = []
+        # 优化器：vision 和 text LoRA 分组，允许 task-wise text LR/freeze。
+        param_groups = []
         if self.has_vision_lora:
-            trainable_params += list(self.model.vision_model.get_params())
-        if self.has_text_lora:
-            trainable_params += list(self.model.text_model.get_params())
+            vision_params = list(self.model.vision_model.get_params())
+            if vision_params:
+                param_groups.append({'params': vision_params, 'lr': self.args.lr})
+        if self.has_text_lora and text_grad_enabled:
+            text_params = list(self.model.text_model.get_params())
+            if text_params:
+                param_groups.append({'params': text_params, 'lr': text_lr})
 
         base_lr = self.args.lr
+        logging.info(
+            "Task train schedule: vision_lora=%s, text_lora=%s, train_text=%s, text_lr=%.6g",
+            self.has_vision_lora, self.has_text_lora, text_grad_enabled, text_lr if text_grad_enabled else 0.0)
         if aux_weight > 0:
             feature_dim = self.model.config.projection_dim
             self.aux_head = nn.Linear(feature_dim, n_classes, bias=False).to(self.device)
-            optimizer = torch.optim.AdamW([
-                {'params': trainable_params, 'lr': base_lr},
-                {'params': self.aux_head.parameters(), 'lr': 5e-3},
-            ], weight_decay=self.args.weight_decay)
+            param_groups.append({'params': self.aux_head.parameters(), 'lr': 5e-3})
+            optimizer = torch.optim.AdamW(param_groups, weight_decay=self.args.weight_decay)
         else:
             self.aux_head = None
-            optimizer = torch.optim.AdamW(trainable_params, base_lr,
-                                          weight_decay=self.args.weight_decay)
+            optimizer = torch.optim.AdamW(param_groups, weight_decay=self.args.weight_decay)
+        # A scalar eta_min keeps CosineAnnealingLR compatible across PyTorch
+        # versions. Use 0 so low text-LR groups are not raised above their
+        # initial LR by the previous base_lr / 3 floor.
         scheduler = CosineAnnealingLR(optimizer, T_max=self.args.iterations,
-                                      eta_min=base_lr / 3)
+                                      eta_min=0.0)
 
         logit_scale = self.model.logit_scale.detach()
 
@@ -363,7 +374,7 @@ class LoRANSPTrainer:
             norm_feats = proj_feats / proj_feats.norm(dim=-1, keepdim=True)
 
             # --- ZS 分类器 ---
-            if self.has_text_lora:
+            if self.has_text_lora and text_grad_enabled:
                 if n_classes > max_zs_classes:
                     # 联合训练场景：随机采样子集控制显存
                     batch_classes = labels.unique().tolist()
@@ -396,7 +407,7 @@ class LoRANSPTrainer:
             loss = ce_loss
 
             preds = logits.argmax(dim=-1)
-            valid_mask = (remapped_labels != -100) if self.has_text_lora and n_classes > max_zs_classes else None
+            valid_mask = (remapped_labels != -100) if self.has_text_lora and text_grad_enabled and n_classes > max_zs_classes else None
             if valid_mask is not None and valid_mask.any():
                 train_acc = (preds[valid_mask] == remapped_labels[valid_mask]).float().mean().item() * 100
             elif valid_mask is not None and not valid_mask.any():
@@ -439,10 +450,13 @@ class LoRANSPTrainer:
                 l_fd = feature_distillation_loss(t_img_f, s_img_f)
                 l_fd_val = l_fd.item()
 
-                # text LoRA 启用时：student 文本特征来自 LoRA 文本编码器
+                # text LoRA 启用时，即使当前任务冻结 text，也使用已经
+                # merge 的 adapted text encoder 作为 no-grad 语义锚点。
                 if self.has_text_lora:
-                    s_txt_f = self.encode_text(r_texts)
-                    s_txt_f = s_txt_f / s_txt_f.norm(dim=-1, keepdim=True)
+                    text_ctx_ref = torch.enable_grad() if text_grad_enabled else torch.no_grad()
+                    with text_ctx_ref:
+                        s_txt_f = self.encode_text(r_texts)
+                        s_txt_f = s_txt_f / s_txt_f.norm(dim=-1, keepdim=True)
                 else:
                     s_txt_f = t_txt_f
 

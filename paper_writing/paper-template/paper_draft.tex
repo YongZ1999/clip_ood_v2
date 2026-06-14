@@ -5,10 +5,12 @@
 \usepackage{booktabs}
 \usepackage{enumitem}
 \usepackage{graphicx}
-\usepackage{hyperref}
+\usepackage[hypertexnames=false]{hyperref}
 \usepackage{xcolor}
 \usepackage{algorithm}
 \usepackage{algpseudocode}
+\setcitestyle{numbers}
+\renewcommand{\theHtable}{tbl.\arabic{table}}
 
 \newtheorem{theorem}{Theorem}[section]
 \newtheorem{proposition}[theorem]{Proposition}
@@ -17,7 +19,9 @@
 % TODO tracking: search for \todo{} to find all placeholders
 \newcommand{\todo}[1]{\textcolor{red}{[TODO: #1]}}
 
-\title{Null-Space Parameterized Low-Rank Adaptation with Bayesian Ensemble Classifiers for Scalable CLIP Continual Learning}
+\title{Null-Space Parameterized Low-Rank Adaptation\\
+with Statistical Replay Classifiers\\
+for Scalable CLIP Continual Learning}
 
 \author{%
 Xuan Rao$^1$, Yong Zeng$^2$, Bo Zhao$^1$, Derong Liu$^3$, and Cesare Alippi$^{4,5}$\\
@@ -26,7 +30,9 @@ $^2$School of Automation and Intelligent Manufacturing, Southern University of S
 $^3$School of Artificial Intelligence, Anhui University, Hefei 230601, China\\
 $^4$Dipartimento di Elettronica e Informazione, Politecnico di Milano, Milano 20133, Italy\\
 $^5$Faculty of Informatics, Universit\`{a} della Svizzera Italiana, Lugano 6900, Switzerland\\
-\texttt{\{raoxuan88, zhaobo\}@bnu.edu.cn}, \texttt{12532847@mail.sustech.edu.cn}, \texttt{derong@ahu.edu.cn}, \texttt{cesare.alippi@usi.ch}
+\texttt{raoxuan88@bnu.edu.cn}, \texttt{zhaobo@bnu.edu.cn}\\
+\texttt{12532847@mail.sustech.edu.cn}, \texttt{derong@ahu.edu.cn}\\
+\texttt{cesare.alippi@usi.ch}
 }
 
 \begin{document}
@@ -34,7 +40,7 @@ $^5$Faculty of Informatics, Universit\`{a} della Svizzera Italiana, Lugano 6900,
 \maketitle
 
 \begin{abstract}
-Continual learning with vision-language models like CLIP offers a pathway toward scalable machine learning systems by leveraging its transferable representations. However, adapting CLIP to downstream tasks while preserving its zero-shot transfer ability remains a significant challenge. Existing methods primarily focus on either the training phase or the inference phase independently, overlooking the potential synergies between them. In this paper, we propose a holistic framework that co-optimizes both training and inference stages for CLIP continual learning through theoretically grounded mechanisms. At the training stage, we introduce LoRA-NSP (Low-Rank Adaptation with Null Space Parameterization), establishing a novel theoretical connection between null space projection (NSP) and low-rank adaptation (LoRA). We prove that NSP represents a degenerate form of LoRA with limited plasticity, and propose a soft forward-pass projection mechanism that generalizes both approaches while preserving the full expressivity of LoRA. At the inference stage, we propose LR-RGDA (Low-Rank Regularized Gaussian Discriminant Analysis), a Bayes-optimal classifier that achieves computational efficiency through Woodbury matrix identity-based low-rank factorization, reducing complexity from $\mathcal{O}(Cd^2)$ to $\mathcal{O}(Cd + Cr^2d)$. We further introduce an ensemble classifier framework that combines LR-RGDA with the zero-shot classifier, achieving principled balance between in-distribution and out-of-distribution classification. Our approach achieves state-of-the-art performance on X-TAIL benchmark, demonstrating the effectiveness of our co-optimization strategy.
+Continual learning with vision-language models like CLIP offers a pathway toward scalable machine learning systems by leveraging transferable representations. However, adapting CLIP to downstream tasks while preserving its zero-shot transfer ability remains challenging. Existing methods primarily focus on either the training phase or the inference phase independently, overlooking the potential synergies between representation adaptation and classifier construction. In this paper, we study a two-stage framework for CLIP continual learning. At the training stage, we introduce LoRA-NSP (Low-Rank Adaptation with Null Space Parameterization), establishing a theoretical connection between null space projection (NSP) and low-rank adaptation (LoRA). We show that NSP can be viewed as a restricted form of LoRA with limited plasticity, and propose a soft forward-pass projection mechanism that preserves all eigendirections while biasing updates away from high-energy historical subspaces. At the inference stage, we study LR-RGDA (Low-Rank Regularized Gaussian Discriminant Analysis), a regularized Gaussian discriminant classifier that uses low-rank covariance structure and the Woodbury matrix identity to reduce classifier cost. We further combine LR-RGDA with the zero-shot classifier and evaluate when this inference-time classifier is competitive with label-memory baselines such as LADA. Our current evidence suggests that the most promising regime is lightweight statistical replay, where historical real features are replaced by compact class statistics rather than stored explicitly.
 \end{abstract}
 
 %==============================================================================
@@ -50,24 +56,24 @@ However, adapting CLIP representations using only task-specific data can severel
 
 %------------------------------------------------------------------------------
 % Paragraph 3: Our Method
-To address these limitations, we propose a holistic framework that co-optimizes both the training and inference stages of CLIP continual learning.
+To address these limitations, we study a two-stage framework that separates representation adaptation from classifier construction in CLIP continual learning.
 
 \textbf{Training Stage: LoRA-NSP.} At the training stage, we introduce \textbf{LoRA-NSP} (Low-Rank Adaptation with Null Space Parameterization), which incorporates soft-projected null space constraints into the low-rank adaptation process. Unlike conventional NSP that zeroes out signal subspaces, our soft projection preserves all eigendirections with adaptive weighting, achieving better stability-plasticity trade-offs. Additionally, we design a distillation loss combining feature distillation (FD) and cross-modal distillation (CD) to maintain representation stability.
 
-\textbf{Inference Stage: Ensemble Classifier.} At the inference stage, we propose an \textbf{ensemble classifier framework} that integrates LR-RGDA (Low-Rank Regularized Gaussian Discriminant Analysis) with the zero-shot classifier. LR-RGDA provides principled uncertainty estimation that naturally discriminates between ID and OOD samples, enabling reliable routing without additional training.
+\textbf{Inference Stage: Ensemble Classifier.} At the inference stage, we study an \textbf{ensemble classifier framework} that integrates LR-RGDA (Low-Rank Regularized Gaussian Discriminant Analysis) with the zero-shot classifier. LR-RGDA uses supervised class statistics extracted from the adapted CLIP feature space, while the zero-shot branch preserves CLIP's text-aligned classifier. This design is particularly relevant when previous task features cannot be stored and must be approximated by compact statistical replay.
 
 %------------------------------------------------------------------------------
 % Paragraph 4: Contributions
 Our contributions are summarized as follows:
 \begin{itemize}
-    \item We establish a novel theoretical connection between null space projection (NSP) and low-rank adaptation (LoRA), proving that NSP represents a degenerate form of LoRA with limited plasticity. Building on this insight, we propose LoRA-NSP with soft forward-pass projection for better stability-plasticity trade-offs, and design an FD+CD distillation mechanism to maintain representation stability and vision-language alignment during continual learning.
-    \item We develop LR-RGDA, a Bayes-optimal classifier that exploits low-rank covariance structures via the Woodbury matrix identity, reducing inference complexity from $\mathcal{O}(Cd^2)$ to $\mathcal{O}(Cd + Crd)$ while maintaining the expressivity of quadratic discriminant analysis.
-    \item We introduce an ensemble classifier framework that combines LR-RGDA with zero-shot classification via an adaptive router, achieving strong OOD detection and competitive ID classification through principled integration of supervised and zero-shot classifiers.
+    \item We establish a theoretical connection between null space projection (NSP) and low-rank adaptation (LoRA), showing that NSP can be viewed as a restricted form of LoRA with limited plasticity. Building on this insight, we propose LoRA-NSP with soft forward-pass projection for better stability-plasticity trade-offs, and design an FD+CD distillation mechanism to maintain representation stability and vision-language alignment during continual learning.
+    \item We develop LR-RGDA, a regularized Gaussian discriminant classifier that exploits low-rank covariance structures via the Woodbury matrix identity, reducing inference complexity relative to full covariance discriminant analysis while retaining class-specific covariance corrections.
+    \item We introduce an inference-time ensemble that combines LR-RGDA with zero-shot classification, and we evaluate its behavior under real-feature and lightweight statistical replay protocols against LADA-style label-memory classifiers.
 \end{itemize}
 
 %------------------------------------------------------------------------------
 % Paragraph 5: Experiments
-We evaluate our method on the recently proposed X-TAIL benchmark~\cite{xu2024rail}, which consists of 10 image classification datasets from diverse domains. \todo{[Experiments Summary] Our ablation studies confirm that each component (NSP, FD, CD) contributes meaningfully. Fill with actual numbers and findings upon completing experiments.}
+We evaluate our method on the recently proposed X-TAIL benchmark~\cite{xu2024rail}, which consists of 10 image classification datasets from diverse domains. Current verified evidence focuses on the inference-stage classifier comparison under matched feature sources and storage protocols; strict incremental training-stage results for LoRA-NSP are being evaluated separately and will be reported only after the same leakage checks and three-seed protocol are satisfied.
 
 %==============================================================================
 \section{Related Work}
@@ -83,10 +89,10 @@ Existing CL methods for VLMs fall into three categories. \textit{Regularization-
 Null space projection (NSP) mitigates forgetting by constraining parameter updates to directions minimally affecting historical representations. GPM~\cite{saha2021gradient} projects gradients onto the approximate null space of previous task features, demonstrating strong stability at the cost of reduced plasticity. DMNSP~\cite{kang2025dynamic} extends this to vision-language continual learning by applying multi-layer null space projection exclusively to the visual branch with a dynamic projection coefficient, achieving finer stability-plasticity control. Concurrently, LoRA-Null~\cite{tang2026lora} initializes LoRA adapters in the null space of input activations to preserve pre-trained knowledge. However, these approaches treat NSP and LoRA as independent mechanisms: GPM and DMNSP perform hard gradient projection without leveraging LoRA's parameter-efficient structure, while LoRA-Null only affects initialization. Furthermore, all existing NSP methods employ hard projection that zeroes out signal subspaces, inherently limiting model plasticity.
 
 \textbf{Inference-Time Classifier Design.}
-Beyond training-phase adaptation, inference-time strategies are critical for balancing in-distribution (ID) and out-of-distribution (OOD) performance. RAIL~\cite{xu2024rail} extends the classifier dimension while freezing feature representations, relying on the vanilla zero-shot CLIP classifier for OOD detection. Gaussian discriminant analysis on deep features has been explored for OOD detection~\cite{lee2018simple}, but its direct application as a classifier in continual learning remains underexplored due to computational and sample-efficiency challenges. Our approach differs by integrating a supervised LR-RGDA classifier with the zero-shot classifier: LR-RGDA's principled uncertainty estimation naturally discriminates ID from OOD samples without additional training, enabling reliable ensemble routing.
+Beyond training-phase adaptation, inference-time strategies are critical for balancing seen-class discrimination and zero-shot transfer. RAIL~\cite{xu2024rail} extends the classifier dimension while freezing feature representations, relying on the vanilla zero-shot CLIP classifier to handle unseen classes. Gaussian discriminant analysis on deep features has been explored for uncertainty estimation and OOD detection~\cite{lee2018simple}, but its direct application as a memory-efficient classifier in CLIP continual learning remains underexplored due to computational and sample-efficiency challenges. Our approach differs by integrating a supervised LR-RGDA classifier with the zero-shot classifier and by explicitly studying real-feature replay versus compact statistical replay.
 
 \textbf{Relation to Our Work.}
-Unlike existing methods that focus on either training or inference optimization, our approach co-optimizes both stages through theoretically grounded mechanisms. \textit{Compared to NSP-based methods} (GPM, DMNSP), LoRA-NSP establishes a novel theoretical connection proving that NSP is a degenerate form of LoRA, and proposes soft projection that preserves all eigendirections rather than hard zeroing. \textit{Compared to LoRA-Null}, LoRA-NSP operates throughout training via forward-pass projection rather than initialization only, and is validated on VLM continual learning. \textit{Compared to CoDyRA}, LoRA-NSP controls update directions via projection matrices rather than varying rank sizes, offering orthogonal and complementary benefits. \textit{Compared to RAIL}, our ensemble classifier leverages supervised Gaussian discriminant analysis rather than zero-shot confidence alone, providing more principled ID/OOD discrimination. Importantly, our training innovations (LoRA-NSP + FD + CD) and inference innovations (LR-RGDA ensemble) are orthogonal and can be combined for maximum performance.
+Unlike existing methods that focus on either training or inference optimization, our approach studies how the two stages interact. \textit{Compared to NSP-based methods} (GPM, DMNSP), LoRA-NSP establishes a theoretical connection showing that NSP is a restricted form of LoRA, and proposes soft projection that preserves all eigendirections rather than hard zeroing. \textit{Compared to LoRA-Null}, LoRA-NSP operates throughout training via forward-pass projection rather than initialization only, and is validated on VLM continual learning. \textit{Compared to CoDyRA}, LoRA-NSP controls update directions via projection matrices rather than varying rank sizes, offering orthogonal and complementary benefits. \textit{Compared to RAIL and LADA}, our inference study emphasizes classifier construction from compact statistics, which targets settings where storing historical real features or label-specific memory is undesirable. The training innovations (LoRA-NSP + FD + CD) and inference innovations (LR-RGDA ensemble) are orthogonal and can be combined, but we evaluate their contributions separately to avoid conflating representation gains with classifier gains.
 
 %==============================================================================
 \section{Method}
@@ -248,10 +254,10 @@ The total training loss is:
 \subsection{Inference Stage: Ensemble Classifier}
 
 \textbf{Motivation.}
-After fine-tuning, the zero-shot classifier leverages CLIP's pre-trained vision-language alignment for classification. However, it relies solely on visual-text similarity, missing discriminative information captured during fine-tuning. We propose an ensemble classifier that combines a Low-Rank Regularized Gaussian Discriminant Analysis (LR-RGDA) classifier with the zero-shot classifier. Our approach is theoretically grounded in Bayesian decision theory and achieves computational efficiency through low-rank factorization.
+After fine-tuning, the zero-shot classifier leverages CLIP's pre-trained vision-language alignment for classification. However, it relies solely on visual-text similarity and may miss discriminative information present in the adapted visual feature space. We study an ensemble classifier that combines a Low-Rank Regularized Gaussian Discriminant Analysis (LR-RGDA) classifier with the zero-shot classifier. The classifier is motivated by Gaussian discriminant analysis and is implemented with low-rank covariance corrections for computational efficiency.
 
 \textbf{Regularized Gaussian Discriminant Analysis.}
-Building upon Gaussian statistics, we aim to construct a classifier that approximates the Bayes-optimal decision rule. After training on task $t$, we model the deep features of each class $c \in \mathcal{C}_t$ as a multivariate Gaussian distribution $p(\mathbf{z}|c) = \mathcal{N}(\boldsymbol{\mu}_c, \mathbf{\Sigma}_c)$, where $\mathbf{z} = f_\theta(\mathbf{x})$ is the feature representation and $\mathcal{C}_t$ is the set of classes observed up to task $t$.
+Building upon Gaussian statistics, we construct a classifier that approximates the Gaussian discriminant decision rule. After training on task $t$, we model the deep features of each class $c \in \mathcal{C}_t$ as a multivariate Gaussian distribution $p(\mathbf{z}|c) = \mathcal{N}(\boldsymbol{\mu}_c, \mathbf{\Sigma}_c)$, where $\mathbf{z} = f_\theta(\mathbf{x})$ is the feature representation and $\mathcal{C}_t$ is the set of classes observed up to task $t$.
 
 By Bayes' theorem, the posterior satisfies $p(c|\mathbf{x}) \propto p(c) \, p(\mathbf{z}|c)$, where $p(c)$ is the class prior. Under uniform priors $p(c) = 1/|\mathcal{C}_t|$, the log-posterior (dropping class-independent constants) is:
 \begin{equation}
@@ -271,10 +277,10 @@ Substituting Eq.~\eqref{eq:cov_reg} into Eq.~\eqref{eq:log_posterior} yields the
     g_c^{\text{RGDA}}(\mathbf{z}) = -\frac{1}{2}(\mathbf{z} - \boldsymbol{\mu}_c)^\top (\mathbf{\Sigma}_c^{\text{reg}})^{-1} (\mathbf{z} - \boldsymbol{\mu}_c) - \frac{1}{2}\log|\mathbf{\Sigma}_c^{\text{reg}}| + \log p(c).
     \label{eq:rgda}
 \end{equation}
-The RGDA classifier selects the class with maximum discriminant score: $\hat{y} = \arg\max_{c \in \mathcal{C}_t} g_c^{\text{RGDA}}(\mathbf{z})$. A formal Bayes-optimality guarantee is provided in Appendix~\ref{app:bayes}.
+The RGDA classifier selects the class with maximum discriminant score: $\hat{y} = \arg\max_{c \in \mathcal{C}_t} g_c^{\text{RGDA}}(\mathbf{z})$. Under correctly specified Gaussian class-conditionals and the chosen regularized covariance model, this rule corresponds to the plug-in Gaussian discriminant classifier discussed in Appendix~\ref{app:bayes}.
 
 \textbf{Low-Rank Factorized RGDA.}
-While RGDA enjoys Bayes optimality under Gaussian assumptions, its inference complexity scales as $\mathcal{O}(Cd^2)$ due to per-class matrix-vector products with $(\mathbf{\Sigma}_c^{\text{reg}})^{-1}$. This becomes prohibitive when both the number of classes $C$ and the feature dimension $d$ are large.
+The full RGDA inference complexity scales as $\mathcal{O}(Cd^2)$ due to per-class matrix-vector products with $(\mathbf{\Sigma}_c^{\text{reg}})^{-1}$. This becomes expensive when both the number of classes $C$ and the feature dimension $d$ are large.
 
 To address this, we exploit the observation that class covariance matrices typically exhibit low-rank structures around a shared baseline. We decompose the regularized covariance as:
 \begin{equation}
@@ -304,15 +310,12 @@ where
 \end{align}
 The complete derivation from Eq.~\eqref{eq:woodbury} to Eq.~\eqref{eq:lr_rgda} is provided in Appendix~\ref{app:lr_rgda_derivation}.
 
-\textbf{OOD Detection Property.}
-A key property of LR-RGDA is that it outputs positive confidence only for in-distribution (ID) samples while assigning near-zero confidence to out-of-distribution (OOD) samples. This stems from its supervised nature: the classifier is trained exclusively on ID data, so OOD samples fall outside the support of the learned Gaussian distributions, producing near-zero posterior probabilities. This provides a natural ID/OOD discriminator without requiring additional OOD detection training.
-
 \textbf{Ensemble Framework.}
-The ensemble classifier balances between discriminative ID classification (LR-RGDA) and generalized zero-shot capability through a contribution coefficient $\alpha$:
+The ensemble classifier balances between supervised classification from LR-RGDA and CLIP's zero-shot classifier through a contribution coefficient $\alpha$:
 \begin{equation}
     p_{\text{ens}}(y|\mathbf{x}) = \alpha \cdot p_{\text{LR-RGDA}}(y|\mathbf{x}) + (1-\alpha) \cdot p_{\text{ZS}}(y|\mathbf{x})
 \end{equation}
-for ID classes, and $p_{\text{ens}}(y|\mathbf{x}) = p_{\text{ZS}}(y|\mathbf{x})$ for OOD classes. The adaptive router further improves OOD detection by routing samples with LR-RGDA confidence below threshold $\tau$ to the zero-shot classifier, ensuring robust classification across both seen and unseen domains.
+over the evaluation label space. In our current implementation we use a fixed mixture rather than an OOD router. This avoids introducing a separate threshold-selection problem and keeps the comparison with LADA focused on classifier construction from the same feature source. We report real-feature and statistical-replay variants separately because they answer different memory-budget questions.
 
 %==============================================================================
 \section{Experiments}
@@ -347,6 +350,10 @@ We compare against the following methods:
 We adopt the CLIP~\cite{radford2021learning} model with a ViT-B/16~\cite{dosovitskiy2021an} image encoder. The training process uses AdamW~\cite{loshchilov2019decoupled} optimizer with learning rate $10^{-4}$ and weight decay $3 \times 10^{-5}$. For LoRA-NSP, we set rank $r=4$, NSP weight $\lambda_{\text{nsp}}=0.02$, and covariance momentum $\alpha=0.9$. For the ensemble classifier, we set $\alpha=0.5$ and temperature $T=1.0$. For LR-RGDA, we use rank 32 with regularization coefficients $\alpha_1=0.6$, $\alpha_2=1.0$, $\alpha_3=0.5$.
 
 \subsection{Main Results}
+
+Strict task-incremental Transfer/Average/Last results are not yet used as paper evidence in this draft. We keep the LADA and RAIL reference numbers as protocol targets, but final claims about LoRA-NSP will be added only after the planned three-seed training-side ablation and incremental evaluation are complete. The current verified result is the storage-dependent classifier boundary in Section~\ref{sec:stat_replay}.
+
+\iffalse
 
 \begin{table}[t]
 \centering
@@ -458,10 +465,59 @@ LR-RGDA only & \todo{48.5} & \todo{65.2} & \todo{78.3} \\
     \item Ensemble: [characteristic description with actual numbers].
 \end{itemize}
 }
+\fi
 
+\subsection{Statistical Replay Protocol}
+\label{sec:stat_replay}
+
+To isolate the inference-stage contribution, we evaluate classifier construction under two feature-storage protocols. In the \emph{real-feature} protocol, classifiers are fitted from the deterministic 16-shot feature set for each class. In the \emph{statistical-replay} protocol, previous class features are represented by compact Gaussian statistics and replayed through class means or GMM-derived pseudo-features. Both LR-RGDA and LADA are fitted from the same feature source, use the same deterministic classifier transform, and are evaluated on the same full test set.
+
+This protocol is intentionally narrower than LADA's official DPT training procedure. LADA DPT uses historical prototypes or Gaussian samples as replay during incremental training, while the current experiment freezes the feature source and rebuilds the final classifiers from matched real or statistical features. Therefore, the comparison below should be read as a controlled classifier-construction study under equal replay sources, not as a claim that compact GMM classifier rebuilding is equivalent to official LADA DPT. This distinction lets us test the classifier inductive bias under a fixed memory budget without conflating it with training-time replay dynamics.
+
+\begin{table}[t]
+\centering
+\caption{Classifier comparison under real-feature and statistical-replay protocols on X-TAIL 16-shot. All classifiers are built with \texttt{classifier\_feature\_transform=test} and evaluated on the same full test set. Results are averaged over seeds 42/43/44.}
+\label{tab:gmm_mean_replay}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lccccc}
+\toprule
+Replay protocol & CLIP-ZS & LR-RGDA & LADA & LR-RGDA+ZS & LADA+ZS \\
+\midrule
+Real 16-shot features & $56.40{\pm}0.00$ & $77.87{\pm}0.16$ & $\mathbf{78.92{\pm}0.16}$ & $78.05{\pm}0.14$ & $\mathbf{78.92{\pm}0.16}$ \\
+GMM raw component means & $56.40{\pm}0.00$ & $76.93{\pm}0.16$ & $76.08{\pm}0.35$ & $\mathbf{77.12{\pm}0.13}$ & $76.08{\pm}0.35$ \\
+GMM raw samples & $56.40{\pm}0.00$ & $76.24{\pm}0.11$ & $75.63{\pm}0.28$ & $\mathbf{76.46{\pm}0.16}$ & $75.63{\pm}0.28$ \\
+GMM sphere samples & $56.40{\pm}0.00$ & $76.22{\pm}0.18$ & $75.66{\pm}0.31$ & $\mathbf{76.45{\pm}0.17}$ & $75.66{\pm}0.31$ \\
+\bottomrule
+\end{tabular}
+}
+\end{table}
+
+Table~\ref{tab:gmm_mean_replay} shows a clear storage-dependent boundary. When real 16-shot features are available, LADA remains stronger ($78.92{\pm}0.16$) than LR-RGDA ($77.87{\pm}0.16$) and LR-RGDA+ZS ($78.05{\pm}0.14$). Under compact statistical replay, however, LR-RGDA consistently exceeds LADA. The strongest setting is GMM component-mean replay: across the three seeds, the LR-RGDA - LADA margins are $+0.96$, $+0.99$, and $+0.59$ percentage points, while the LR-RGDA+ZS - LADA margins are $+1.18$, $+1.19$, and $+0.74$ points. Stochastic GMM replay gives smaller but still positive margins for both raw-space and sphere-space sampling, suggesting that the main effect is not the raw-versus-sphere fitting space but the use of compact, low-noise component statistics. We therefore interpret LR-RGDA as a statistical-replay classifier that is most competitive when historical features must be compressed, not as a universal replacement for LADA under unrestricted feature storage.
+
+\begin{table}[t]
+\centering
+\caption{Replay-source storage budget for X-TAIL 16-shot with CLIP ViT-B/16 features ($C=1100$ classes, $d=512$, float32 storage). The table counts the stored historical feature representation used to construct or replay classifiers, not the final classifier parameters.}
+\label{tab:storage_budget}
+\begin{tabular}{lccc}
+\toprule
+Stored representation & Items per class & Formula & Storage \\
+\midrule
+Real 16-shot features & 16 features & $C \cdot 16 \cdot d$ & 34.38 MiB \\
+LADA $k{=}16$ centers & 16 centers & $C \cdot 16 \cdot d$ & 34.38 MiB \\
+GMM $k{=}4$ component means & 4 means & $C \cdot 4 \cdot d$ & 8.59 MiB \\
+GMM $k{=}4$ spherical params & 4 means, variances, weights & $C \cdot 4 \cdot (d+2)$ & 8.63 MiB \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:storage_budget} makes the memory setting explicit. With 16-shot data, storing LADA's $k=16$ label centers has the same feature-vector count as storing all real training features. By contrast, the $k=4$ GMM replay source used in our compact statistical protocol stores roughly one quarter as many feature vectors. This is the memory regime in which LR-RGDA is most competitive in Table~\ref{tab:gmm_mean_replay}. We do not claim that the final LR-RGDA classifier parameters are always smaller than LADA's label-memory classifier; the claim is about reconstructing or fitting classifiers from a compact historical replay source.
+
+% OOD detection experiments were part of an earlier draft. They are intentionally
+% removed from the main claim until a dedicated, leakage-free evaluation is added.
+\iffalse
 \subsection{OOD Detection Performance}
 
-We evaluate the OOD detection capability of our LR-RGDA-based detector. Table~\ref{tab:ood} reports the AUROC and FPR@95TPR metrics on X-TAIL. Our method achieves strong OOD detection performance, demonstrating the effectiveness of using LR-RGDA confidence for ID/OOD discrimination.
+We evaluate the OOD detection capability of our LR-RGDA-based detector. Table~\ref{tab:ood} reports the AUROC and FPR@95TPR metrics on X-TAIL.
 
 \begin{table}[t]
 \centering
@@ -481,12 +537,13 @@ MSP~\cite{hendrycks2017baseline} & 79.5 & 52.1 \\
 \end{table}
 
 \todo{[OOD Detection Narrative] Fill based on actual results. Our LR-RGDA-based OOD detector achieves [AUROC]\% AUROC and [FPR]\% FPR@95, [comparison with baselines].}
+\fi
 
 %==============================================================================
 \section{Conclusion}
 \label{sec:conclusion}
 
-In this paper, we propose a holistic framework for CLIP continual learning that co-optimizes both training and inference stages. At the training stage, LoRA-NSP integrates null space constraints with low-rank adaptation to mitigate catastrophic forgetting while enabling efficient task-specific adaptation. At the inference stage, our ensemble classifier framework combines LR-RGDA with zero-shot classification to achieve optimal balance between ID and OOD classification. Extensive experiments on the X-TAIL benchmark validate the effectiveness of our co-optimization strategy. \todo{[Conclusion] Revise final sentence based on actual results: replace "state-of-the-art performance" with quantitative statement if supported by data.}
+In this paper, we propose a two-stage framework for CLIP continual learning that combines LoRA-NSP training with inference-time classifier construction. At the training stage, LoRA-NSP integrates soft null-space constraints with low-rank adaptation to mitigate catastrophic forgetting while retaining plasticity. At the inference stage, the LR-RGDA and zero-shot ensemble provides a statistical classifier alternative to label-memory baselines, with the strongest current motivation in compact statistical replay settings. Extensive experiments on the X-TAIL benchmark are ongoing; final claims will be restricted to settings where three-seed results verify an advantage over LADA or demonstrate a clear memory-performance trade-off.
 
 %==============================================================================
 \bibliographystyle{plain}
@@ -713,10 +770,10 @@ H.~Lu et al.
 \appendix
 %==============================================================================
 
-\section{Bayes Optimality of RGDA}
+\section{MAP Equivalence of RGDA Under a Regularized Gaussian Model}
 \label{app:bayes}
 
-\begin{theorem}[Bayes Optimality of RGDA]
+\begin{theorem}[MAP Equivalence of RGDA]
 \label{thm:bayes}
 Let $\mathcal{C}_t = \{1, \ldots, C\}$ be the set of classes observed up to task $t$. Assume that:
 \begin{enumerate}[label=(\roman*)]
@@ -762,7 +819,16 @@ where we abbreviate $\mathbf{M}_c = \boldsymbol{\Lambda}_c^{-1} + \mathbf{U}_c^\
     \boldsymbol{\delta}_c^\top (\mathbf{\Sigma}_c^{\text{reg}})^{-1} \boldsymbol{\delta}_c
     &= \boldsymbol{\delta}_c^\top \mathbf{B}^{-1} \boldsymbol{\delta}_c - \boldsymbol{\delta}_c^\top \mathbf{B}^{-1} \mathbf{U}_c \mathbf{M}_c^{-1} \mathbf{U}_c^\top \mathbf{B}^{-1} \boldsymbol{\delta}_c \nonumber\\
     &= (\mathbf{z}^\top \mathbf{B}^{-1} \mathbf{z} - 2\boldsymbol{\mu}_c^\top \mathbf{B}^{-1} \mathbf{z} + \boldsymbol{\mu}_c^\top \mathbf{B}^{-1} \boldsymbol{\mu}_c) \nonumber\\
-    &\quad - (\mathbf{z}^\top \mathbf{B}^{-1} \mathbf{U}_c \mathbf{M}_c^{-1} \mathbf{U}_c^\top \mathbf{B}^{-1} \mathbf{z} - 2\boldsymbol{\mu}_c^\top \mathbf{B}^{-1} \mathbf{U}_c \mathbf{M}_c^{-1} \mathbf{U}_c^\top \mathbf{B}^{-1} \mathbf{z} + \boldsymbol{\mu}_c^\top \mathbf{B}^{-1} \mathbf{U}_c \mathbf{M}_c^{-1} \mathbf{U}_c^\top \mathbf{B}^{-1} \boldsymbol{\mu}_c). \label{eq:quad_expand}
+    &\quad - \bigl(
+    \mathbf{z}^\top \mathbf{B}^{-1} \mathbf{U}_c \mathbf{M}_c^{-1}
+    \mathbf{U}_c^\top \mathbf{B}^{-1} \mathbf{z} \nonumber\\
+    &\qquad
+    - 2\boldsymbol{\mu}_c^\top \mathbf{B}^{-1} \mathbf{U}_c \mathbf{M}_c^{-1}
+    \mathbf{U}_c^\top \mathbf{B}^{-1} \mathbf{z} \nonumber\\
+    &\qquad
+    + \boldsymbol{\mu}_c^\top \mathbf{B}^{-1} \mathbf{U}_c \mathbf{M}_c^{-1}
+    \mathbf{U}_c^\top \mathbf{B}^{-1} \boldsymbol{\mu}_c
+    \bigr). \label{eq:quad_expand}
 \end{align}
 Collecting terms by powers of $\mathbf{z}$:
 \begin{itemize}
