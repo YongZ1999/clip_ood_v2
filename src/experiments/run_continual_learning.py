@@ -4,6 +4,9 @@
 """
 
 import os
+os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
+os.environ['TRANSFORMERS_VERBOSITY'] = 'error'
+
 import sys
 import argparse
 import json

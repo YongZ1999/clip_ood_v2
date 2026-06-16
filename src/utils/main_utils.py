@@ -392,7 +392,7 @@ def get_full_stats(matrix):
             if k == 0:
                 trans.append(0.0)  # placeholder for display
             else:
-                trans.append(sum(matrix[j][k] for j in range(k)) / k)
+                trans.append(sum(matrix[k][j] for j in range(k)) / k)
         # Transfer = mean of Transfer_k for k=2..K (K-1 values)
         transfer_values = [trans[k] for k in range(1, K)]
         transfer_total_avg = sum(transfer_values) / len(transfer_values)

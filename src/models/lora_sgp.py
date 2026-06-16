@@ -328,6 +328,10 @@ class LoRACLIPVisionTransformer(nn.Module):
         self.clip_vision_model = clip_vision_model
 
     @torch.no_grad()
+    def _ensure_merged_before_rebuild(self):
+        self.merge_lora_weights()
+
+    @torch.no_grad()
     def update_projection_matrices(self, covariances: Dict[str, torch.Tensor]) -> None:
         for name, cov in covariances.items():
             if name not in self.lora_modules:
