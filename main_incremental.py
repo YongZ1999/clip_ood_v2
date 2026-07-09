@@ -12,17 +12,41 @@
         --dataset_sequence aircraft caltech101 dtd eurosat flowers food101 mnist oxford_pets stanford_cars sun397 \\
         --num_shots 16 --batch_size 32 --iterations 800 \\
         --lora_type lora_nsp --alpha 0.05
+
+默认行为（基于 10-task 消融最佳配置，2026-07-07）：
+    - 文本编码器全程微调 (--text_tuning_schedule always)。
+    - LoRA (非 DoRA)，hard NSP，nsp_eps=0.20。
+    - mc4ft200 集成分类器 (num_centers=4, rgda_train_iter=200)。
+    - 评估时零样本分类器使用 lada_hybrid 模式：已见类用各任务训练后的文本原型，
+      未见类用预训练 CLIP。
+    - LADA 分类器评估默认开启 (--enable_lada)。
+    - 默认使用同步评估：每步训练结束后在进程中直接完成评估。
+    - 如需异步评估，显式传入 --save_step_artifacts --skip_inline_eval [--async_eval_dir <dir>]；
+      未指定 --async_eval_dir 时会自动在 --output_dir 下创建带时间戳的目录。
+
+加速建议：
+    1. 使用 --eval_batch_size 128 或更大来加速评估阶段特征提取。
+    2. 如不需要 LADA 对比，添加 --disable_lada 以节省分类器构建时间。
+    3. 训练后用 scripts/evaluate_incremental_rgda_sweep_artifacts.py 做离线 alpha 扫描。
+
+检索评估：
+    使用 --enable_retrieval_eval 开启每任务后的多模态检索评估。
+    首次使用前运行 scripts/download_retrieval_datasets.sh 下载 COCO/Flickr30K 到共享路径。
+    数据集默认路径: /mnt/raoxuan/open_datasets/ (可通过 --retrieval_root / --retrieval_roots 修改)
 """
 
 import os
 os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
 
 import torch
+torch.set_num_threads(8)
+torch.set_num_interop_threads(8)
 import torch.nn.functional as F
 import argparse
 import json
 import logging
 import shutil
+import time
 from datetime import datetime
 from pathlib import Path
 from torch.utils.data import DataLoader, ConcatDataset
@@ -30,7 +54,17 @@ from torch.utils.data import DataLoader, ConcatDataset
 from src.trainers.lora_nsp_trainer import LoRANSPTrainer
 from src.classifiers.lr_rgda_classifier import LRRGDAClassifier
 from src.classifiers.gaussian_statistics import build_multi_center_stats_dict
+from src.lada import LADAClassifier
 from src.utils.reference_loader import load_reference_dataset
+from src.utils.retrieval_eval import (
+    evaluate_retrieval_model,
+    load_retrieval_dataset,
+    retrieval_payload,
+    flatten_retrieval_row,
+    parse_recall_ks,
+    parse_retrieval_roots,
+)
+from src.utils.infinite_sampler import InfiniteSampler
 from src.utils.main_utils import (
     fix_random_seed,
     get_zeroshot_classifier,
@@ -38,6 +72,49 @@ from src.utils.main_utils import (
 )
 from src.utils.continual_metrics import ContinualLearningMetrics
 from utils_data import get_xtail_trainloader, get_xtail_classnames, get_transforms
+
+
+class StageTimer:
+    """Simple accumulating timer for profiling long-running stages."""
+
+    def __init__(self):
+        self.records = {}
+        self._stack = []
+        self._start = None
+
+    def start(self, name):
+        self._stack.append((name, time.time()))
+        return self
+
+    def stop(self, name=None):
+        if not self._stack:
+            return self
+        expected_name, start = self._stack.pop()
+        if name is not None and name != expected_name:
+            logging.warning("Timer mismatch: expected %s, got %s", expected_name, name)
+        elapsed = time.time() - start
+        self.records[expected_name] = self.records.get(expected_name, 0.0) + elapsed
+        return self
+
+    def reset(self):
+        self.records.clear()
+        self._stack.clear()
+        self._start = None
+
+    def summary(self):
+        if not self.records:
+            return "No timing records."
+        total = sum(self.records.values())
+        lines = ["Stage timing summary (seconds):"]
+        for name, elapsed in sorted(self.records.items(), key=lambda x: -x[1]):
+            pct = elapsed / total * 100 if total > 0 else 0.0
+            lines.append(f"  {name:40s}: {elapsed:8.2f}s ({pct:5.1f}%)")
+        lines.append(f"  {'TOTAL':40s}: {total:8.2f}s")
+        return "\n".join(lines)
+
+
+# Global timer for the whole run.
+_RUN_TIMER = StageTimer()
 
 
 LADA_16SHOT_EPOCHS = {
@@ -118,13 +195,16 @@ def _encode_text_classifier_columns(model, processor, class_names, device):
 
 
 def _build_text_classifier(args, model, processor, frozen_model, global_class_names,
-                           cached_seen_text_features, device):
+                           cached_seen_text_features, device,
+                           frozen_classifier=None):
     if args.text_classifier_mode == "current":
         return get_zeroshot_classifier(model, processor, global_class_names, device)
     if args.text_classifier_mode != "lada_hybrid":
         raise ValueError(f"Unsupported text_classifier_mode: {args.text_classifier_mode}")
 
-    frozen_classifier = get_zeroshot_classifier(frozen_model, processor, global_class_names, device)
+    if frozen_classifier is None:
+        frozen_classifier = get_zeroshot_classifier(
+            frozen_model, processor, global_class_names, device)
     if cached_seen_text_features is None or cached_seen_text_features.numel() == 0:
         return frozen_classifier
     seen_count = cached_seen_text_features.shape[0]
@@ -148,14 +228,13 @@ def _fit_spherical_gmm_memory(features, labels, k):
             n_components=actual_k,
             covariance_type="spherical",
             random_state=42 + int(cid),
-            reg_covar=1e-6,
-        )
+            reg_covar=1e-6)
         gmm.fit(class_features)
+
         memory[int(cid)] = {
             "means": torch.from_numpy(gmm.means_).float(),
             "covariances": torch.from_numpy(gmm.covariances_).float(),
-            "weights": torch.from_numpy(gmm.weights_).float(),
-        }
+            "weights": torch.from_numpy(gmm.weights_).float()}
     return memory
 
 
@@ -305,6 +384,7 @@ def _atomic_save_step_artifact(
     current_num_classes,
     gmm_memory=None,
     rgda_stats_by_m=None,
+    lada_classifier=None,
 ):
     """Save an immutable post-task snapshot and publish an eval-ready job."""
     if not args.async_eval_dir:
@@ -361,6 +441,17 @@ def _atomic_save_step_artifact(
                 "M": args.num_centers,
             },
         },
+        "lada": (
+            {
+                "state_dict": _cpu_state_dict(lada_classifier.state_dict()),
+                "feature_dim": lada_classifier.feature_dim,
+                "beta": lada_classifier.beta,
+                "score_mode": lada_classifier.score_mode,
+                "k": args.lada_k,
+            }
+            if lada_classifier is not None
+            else None
+        ),
     }
     torch.save(artifact, artifact_path)
 
@@ -380,8 +471,7 @@ def parse_args():
 
     # 数据集相关参数
     parser.add_argument("--id_datasets", type=str, nargs='+',
-                        default=["aircraft", "caltech101", "dtd", "eurosat", "flowers",
-                                 "food101", "mnist", "oxford_pets", "stanford_cars", "sun397"],
+                        default=["aircraft", "caltech101", "dtd", "eurosat", "flowers", "food101", "mnist", "oxford_pets", "stanford_cars", "sun397"],
                         help="List of all ID datasets (for reference).")
     parser.add_argument("--root", type=str, default="/data1/open_datasets/X-TAIL",
                         help="Root directory of the dataset.")
@@ -391,6 +481,14 @@ def parse_args():
                         help="Use full dataset instead of few-shot (overrides --num_shots).")
     parser.add_argument("--batch_size", type=int, default=32,
                         help="Batch size for training and testing.")
+    parser.add_argument("--eval_batch_size", type=int, default=None,
+                        help="Batch size used during evaluation. "
+                             "Defaults to --batch_size. Larger values (e.g. 128-256) "
+                             "speed up feature extraction without affecting results.")
+    parser.add_argument("--eval_keep_features_on_device", action="store_true", default=False,
+                        help="Keep extracted test features on GPU during evaluation. "
+                             "Avoids CPU↔GPU transfer overhead, but increases GPU memory usage. "
+                             "Enable only when test sets fit in GPU memory.")
     parser.add_argument("--eval_max_samples", type=int, default=0,
                         help="Maximum number of test samples per dataset (0=full split).")
 
@@ -402,7 +500,7 @@ def parse_args():
                              "Each element is a single dataset name.")
 
     # 训练基础参数
-    parser.add_argument("--seed", type=int, default=42,
+    parser.add_argument("--seed", type=int, default=43,
                         help="Random seed for reproducibility.")
     parser.add_argument("--gpu", type=int, default=0,
                         help="GPU index to use (e.g., 0 for cuda:0). Sets CUDA_VISIBLE_DEVICES.")
@@ -423,11 +521,21 @@ def parse_args():
 
     # 优化器参数
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate.")
+    parser.add_argument("--eta_min", type=float, default=0.0,
+                        help="Minimum LR for cosine annealing (0.0 = decay to zero). "
+                             "Applied to cosine and cosine_with_warmup schedulers.")
     parser.add_argument("--weight_decay", type=float, default=3e-5,
                         help="Weight decay for optimizer.")
-    parser.add_argument("--scheduler", type=str, default="cosine",
-                        choices=["cosine", "onecycle"],
+    parser.add_argument("--scheduler", type=str, default="cosine_with_warmup",
+                        choices=["cosine", "onecycle", "cosine_with_warmup", "linear", "constant"],
                         help="Per-step learning-rate scheduler.")
+    parser.add_argument("--warmup_ratio", type=float, default=0.1,
+                        help="Warmup ratio for cosine_with_warmup scheduler (0.0 = no warmup).")
+    parser.add_argument("--optimizer", type=str, default="adamw",
+                        choices=["adamw", "adam", "sgd", "adagrad", "rmsprop"],
+                        help="Optimizer for LoRA/text adapter parameters.")
+    parser.add_argument("--momentum", type=float, default=0.9,
+                        help="Momentum for SGD optimizer.")
 
     # LoRA 相关参数
     parser.add_argument("--lora_rank", type=int, default=4,
@@ -436,24 +544,43 @@ def parse_args():
                         help="LoRA alpha scaling factor. Defaults to lora_rank when None.")
     parser.add_argument("--lora_dropout", type=float, default=0.0,
                         help="LoRA dropout rate (only effective for lora_vanilla).")
+    parser.add_argument("--lora_target_modules", type=lambda x: [m.strip() for m in x.split(',')],
+                        default=["q_proj", "k_proj", "v_proj", "out_proj", "fc1", "fc2"],
+                        help="Comma-separated LoRA target module names.")
     parser.add_argument("--lora_type", type=str, default="lora_nsp",
                         choices=["lora_vanilla", "lora_sgp", "lora_nsp"],
                         help="Type of LoRA adaptation (for backward compat).")
+    parser.add_argument("--use_dora", type=lambda x: x.lower() in ('true', '1', 'yes'),
+                        default=False,
+                        help="Use DoRA (SGPBaseDoRA) for lora_nsp/lora_sgp; set false for plain LoRA (SGPBaseLoRA).")
     parser.add_argument("--init_mode", type=str, default="lora_nsp",
                         choices=["lora_nsp", "lora_vanilla",
                                  "proj_sigma_tail", "proj_sigma_middle",
                                  "weight_svd_tail", "weight_svd_middle"],
-                        help="""Adapter initialization mode.
+                        help="""Adapter initialization mode (legacy, kept for backward compat).
     lora_nsp:        (default) runtime P + random A/B init (current LoRA-NSP)
     lora_vanilla:    standard LoRA, no P, no structured init
     proj_sigma_tail: Σ's smallest eigenvectors → project W → init A/B
     proj_sigma_middle: Σ's middle eigenvectors → project W → init A/B
     weight_svd_tail: W's smallest singular components → init A/B
     weight_svd_middle: W's middle singular components → init A/B""")
-    parser.add_argument("--nsp_eps", type=float, default=0.05,
+    parser.add_argument("--projection_param_mode", type=str, default="full",
+                        choices=["full", "fixed_basis", "core_basis"],
+                        help="LoRA delta parameterization mode.")
+    parser.add_argument("--basis_rank", type=int, default=128,
+                        help="Rank k of the fixed/core basis subspace.")
+    parser.add_argument("--basis_window", type=str, default="tail",
+                        choices=["tail", "middle"],
+                        help="Which eigenvalue window to use for basis extraction.")
+    parser.add_argument("--null_init_mode", type=str, default="none",
+                        choices=["none", "history_init_only", "history_init_runtime"],
+                        help="LoRA-Null-style initialization mode.")
+    parser.add_argument("--nsp_eps", type=float, default=0.20,
                         help="Epsilon parameter for NSP.")
     parser.add_argument("--nsp_weight", type=float, default=0.02,
                         help="Weight parameter for NSP.")
+    parser.add_argument("--use_soft_projection", action="store_true", default=False,
+                        help="Use soft projection (eigenvalue-weighted) instead of hard subspace projection.")
     parser.add_argument("--weight_temp", type=float, default=1.0,
                         help="Temperature parameter for weight.")
     parser.add_argument("--weight_kind", type=str, default="log1p")
@@ -467,13 +594,20 @@ def parse_args():
                         help="Batch size for reference dataset.")
     parser.add_argument("--num_workers", type=int, default=6,
                         help="Number of workers for data loading.")
+    parser.add_argument("--amp", action="store_true", default=True,
+                        help="Use automatic mixed precision (AMP) during training.")
 
     # 损失函数权重参数
     parser.add_argument("--fd_weight", type=float, default=1.0,
                         help="Weight for feature distillation loss (0=disabled).")
-    parser.add_argument("--cd_weight", type=float, default=1.0,
+    parser.add_argument("--cd_weight", type=float, default=2.0,
                         help="Weight for cross-modal distillation loss (0=disabled).")
-    parser.add_argument("--aux_weight", type=float, default=1.0,
+    parser.add_argument("--cd_divergence", type=str, default="kl_forward",
+                        choices=["kl_forward", "kl_reverse", "js", "mse", "cosine", "l1"],
+                        help="Divergence form for cross-modal distillation.")
+    parser.add_argument("--cd_temperature", type=float, default=4.0,
+                        help="Temperature for cross-modal distillation soft labels.")
+    parser.add_argument("--aux_weight", type=float, default=0.0,
                         help="Weight for auxiliary linear classifier loss (0=disabled). "
                              "Adds a linear head on features during training to improve "
                              "feature separability for downstream LR-RGDA.")
@@ -485,6 +619,13 @@ def parse_args():
     # 分类器参数
     parser.add_argument("--alpha", type=float, default=0.05,
                         help="Weight for LR-RGDA classifier in ensemble (paper: 0.05).")
+    parser.add_argument("--alpha_sensitivity", action="store_true", default=True,
+                        help="Enable per-task alpha sensitivity sweep (21 points 0.0-1.0). "
+                             "Use --no-alpha_sensitivity to disable.")
+    parser.add_argument("--n_alpha_samples", type=int, default=21,
+                        help="Number of alpha points in sensitivity sweep.")
+    parser.add_argument("--alpha_sweep_batch_size", type=int, default=512,
+                        help="Chunk size for alpha sweep evaluation.")
     parser.add_argument("--temperature", type=float, default=1.0,
                         help="Temperature for zero-shot classifier.")
     parser.add_argument("--adaptive_ensemble", action='store_true', default=False,
@@ -507,7 +648,7 @@ def parse_args():
                         help="qda_reg_alpha2 for LR-RGDA.")
     parser.add_argument("--rgda_alpha3", type=float, default=0.5,
                         help="qda_reg_alpha3 for LR-RGDA.")
-    parser.add_argument("--rgda_train_iter", type=int, default=0,
+    parser.add_argument("--rgda_train_iter", type=int, default=200,
                         help="LR-RGDA classifier fine-tuning iterations (0=analytical only).")
     parser.add_argument("--rgda_train_lr", type=float, default=0.01,
                         help="LR-RGDA classifier fine-tuning learning rate.")
@@ -534,32 +675,39 @@ def parse_args():
                         help="Zero-shot 分类器最大类数上限（用于联合训练时的随机采样）。")
     parser.add_argument("--tune_vision_encoder", type=lambda x: x.lower() == 'true', default=True,
                         help="是否微调视觉编码器（默认 True）。设为 False 则仅微调文本编码器（text-only模式）。")
-    parser.add_argument("--text_tuning_schedule", type=str, default=None,
+    parser.add_argument("--text_tuning_schedule", type=str, default="always",
                         choices=["always", "never", "freeze_after", "low_lr_after"],
-                        help="文本编码器微调调度。None=根据tune_text_encoder自动选择。")
+                        help="文本编码器微调调度。freeze_after=仅在任务1训练文本端，之后冻结；"
+                             "low_lr_after=任务1后降低文本LR；always=始终训练；never=不训练。")
     parser.add_argument("--text_schedule_switch_task", type=int, default=1,
                         help="切换到降低文本LR的任务编号（1-indexed）。")
     parser.add_argument("--text_lr_scale_after_task", type=float, default=0.2,
                         help="switch_task之后文本LR的缩放因子（low_lr_after模式下）。")
-    parser.add_argument("--num_centers", type=int, default=1,
+    parser.add_argument("--num_centers", type=int, default=4,
                         help="Number of k-means centers per class for multi-center LR-RGDA. 1=single-center.")
-    parser.add_argument("--artifact_num_centers", type=str, default="",
+    parser.add_argument("--artifact_num_centers", type=str, default="1,4",
                         help="Comma-separated center counts whose compact LR-RGDA stats are saved in "
                              "step artifacts for offline classifier sweeps. The active --num_centers "
-                             "is always included. Example: 1,4.")
-    parser.add_argument("--text_classifier_mode", type=str, default="current",
+                             "is always included. Default 1,4 enables the default offline sweep.")
+    parser.add_argument("--text_classifier_mode", type=str, default="lada_hybrid",
                         choices=["current", "lada_hybrid"],
-                        help="Text classifier used at evaluation. current encodes all classes with the "
-                             "current adapted text encoder. lada_hybrid uses cached tuned text prototypes "
-                             "for seen classes and frozen CLIP zero-shot features for unseen classes.")
+                        help="Text classifier used at evaluation. lada_hybrid (default) uses cached "
+                             "tuned text prototypes for seen classes and frozen CLIP zero-shot features "
+                             "for unseen classes. current encodes all classes with the current adapted "
+                             "text encoder.")
 
     # LADA 分类器参数（用于与 LR-RGDA 对比）
-    parser.add_argument("--enable_lada", action="store_true", default=False,
-                        help="Enable LADA classifier for comparison.")
+    parser.add_argument("--enable_lada", action="store_true", default=True,
+                        help="Enable LADA classifier for comparison. Enabled by default.")
+    parser.add_argument("--disable_lada", action="store_true", default=False,
+                        help="Disable the default LADA classifier evaluation.")
     parser.add_argument("--lada_k", type=int, default=16,
                         help="LADA prototypes per class.")
     parser.add_argument("--lada_beta", type=float, default=1.0,
                         help="LADA affinity sharpness.")
+    parser.add_argument("--lada_score_mode", type=str, default="exp_sum",
+                        choices=["exp_sum", "linear_sum", "linear_max"],
+                        help="LADA prototype scoring mode.")
     parser.add_argument("--lada_alpha", type=float, default=0.05,
                         help="LADA+ZS ensemble weight.")
     parser.add_argument("--lada_train_iter", type=int, default=0,
@@ -581,19 +729,48 @@ def parse_args():
     parser.add_argument("--gaussian_samples_per_class", type=int, default=16,
                         help="Number of pseudo-samples per class for GMM replay.")
 
+    # 多模态检索评估参数
+    parser.add_argument("--enable_retrieval_eval", action="store_true", default=False,
+                        help="Enable image-text retrieval evaluation after each task.")
+    parser.add_argument("--retrieval_datasets", type=str, default="mscoco_2014_5k,flickr30k_hf",
+                        help="Comma-separated retrieval dataset names: flickr8k, coco_val2014, coco_val2014_hf, "
+                             "flickr30k_hf, flickr30k_cn, mscoco_2014_5k (default: mscoco_2014_5k,flickr30k_hf).")
+    parser.add_argument("--retrieval_root", type=str, default="/mnt/raoxuan/open_datasets",
+                        help="Fallback root for retrieval datasets.")
+    parser.add_argument("--retrieval_roots", type=str,
+                        default="flickr8k=/mnt/open_datasets/flickr8k,"
+                                "coco_val2014=/mnt/raoxuan/open_datasets/coco_val2014,"
+                                "coco_val2014_hf=/mnt/raoxuan/open_datasets/coco_val2014_hf,"
+                                "flickr30k_hf=/mnt/raoxuan/open_datasets/flickr30k_hf,"
+                                "flickr30k_cn=/mnt/open_datasets/chinese-clip-eval/Flickr30k-CN,"
+                                "mscoco_2014_5k=/mnt/raoxuan/open_datasets/mscoco_2014_5k_test_hf",
+                        help="Comma-separated dataset=/path entries for per-dataset retrieval roots.")
+    parser.add_argument("--retrieval_batch_size", type=int, default=128,
+                        help="Batch size for retrieval evaluation.")
+    parser.add_argument("--retrieval_recall_ks", type=str, default="1,5,10",
+                        help="Comma-separated recall@k values.")
+    parser.add_argument("--retrieval_max_images", type=int, default=0,
+                        help="Max images per retrieval dataset (0=all).")
+
     # 输出参数
     parser.add_argument("--output_dir", type=str, default="experiments",
                         help="Output directory for result JSON files.")
     parser.add_argument("--experiment_name", type=str, default=None,
                         help="Stable experiment label for result file naming and summarizer.")
     parser.add_argument("--async_eval_dir", type=str, default=None,
-                        help="Directory for async eval artifacts, queue files, and results.")
+                        help="Directory for async eval artifacts, queue files, and results. "
+                             "If --save_step_artifacts is enabled and this is omitted, a "
+                             "timestamped subdirectory under --output_dir is created automatically.")
     parser.add_argument("--save_step_artifacts", action="store_true", default=False,
-                        help="Save a post-task model/classifier artifact for external evaluation.")
+                        help="Save a post-task model/classifier artifact for external evaluation. "
+                             "Enable this (and --skip_inline_eval) to run async/offline sweeps.")
     parser.add_argument("--skip_inline_eval", action="store_true", default=False,
-                        help="Skip in-process evaluation. Requires --save_step_artifacts.")
+                        help="Skip in-process evaluation and rely on async worker instead. "
+                             "Requires --save_step_artifacts.")
 
     args = parser.parse_args()
+    args.enable_lada = bool(args.enable_lada) and not args.disable_lada
+
     # 将 dataset_sequence 转换为嵌套列表格式 [[d1], [d2], ...]
     args.dataset_sequence = [[d] for d in args.dataset_sequence]
 
@@ -610,22 +787,29 @@ def parse_args():
     if args.skip_inline_eval and not args.save_step_artifacts:
         parser.error("--skip_inline_eval requires --save_step_artifacts")
     if args.save_step_artifacts and not args.async_eval_dir:
-        parser.error("--save_step_artifacts requires --async_eval_dir")
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        exp_label = args.experiment_name or f"run_{ts}"
+        args.async_eval_dir = str(Path(args.output_dir) / f"async_eval_{exp_label}")
 
     return args
 
 
 def main(args):
+    global _RUN_TIMER
+    _RUN_TIMER.reset()
+    _RUN_TIMER.start("total")
+
     if args.seed is not None:
         fix_random_seed(args.seed)
 
     # ========== 1. 初始化 ==========
     logging.info("\n=== Initializing Incremental Learning ===")
+    _RUN_TIMER.start("init")
     trainer = LoRANSPTrainer(args)
     model = trainer.model
     processor = trainer.processor
 
-    # 解析文本编码器调度的默认值
+    # 解析文本编码器调度的默认值（CLI 默认已是 freeze_after）
     if args.text_tuning_schedule is None:
         args.text_tuning_schedule = "always" if args.tune_text_encoder else "never"
 
@@ -642,8 +826,9 @@ def main(args):
         args.tune_text_encoder = True
 
     use_distillation = args.fd_weight > 0 or args.cd_weight > 0
-    reference_loader = load_reference_dataset(args, trainer.model_pretrain,
-                                              processor, args.device) if use_distillation else None
+    reference_loader = load_reference_dataset(
+        args, trainer.model_pretrain, processor, args.device,
+        return_tokenized_text=True) if use_distillation else None
 
     # 预收集所有数据集的类名，用于全局 ZS 分类器（text LoRA 每次 merge 后更新）
     global_class_names = []
@@ -659,6 +844,30 @@ def main(args):
             next_label_offset += len(c_names)
             global_class_names.extend(c_names)
 
+    # 预构建所有测试 loader，避免每次评估重复构造 dataset
+    _RUN_TIMER.start("build_test_loaders")
+    test_loader_cache = {}
+    eval_bs = args.eval_batch_size if args.eval_batch_size is not None else args.batch_size
+    for task_datasets in args.dataset_sequence:
+        d_name = task_datasets[0]
+        _, test_transform = get_transforms(d_name)
+        _, _, te_loader, c_names = get_xtail_trainloader(
+            root=args.root, dataset_name=d_name,
+            transform_train=None, transform_test=test_transform,
+            num_shots=args.num_shots, batch_size=eval_bs,
+            num_workers=args.num_workers)
+        test_loader_cache[d_name] = (te_loader, c_names)
+    _RUN_TIMER.stop("build_test_loaders")
+
+    # 预计算 frozen CLIP 的零样本分类器（lada_hybrid 模式下复用）
+    frozen_zeroshot_classifier = None
+    if args.text_classifier_mode == "lada_hybrid":
+        _RUN_TIMER.start("build_frozen_zs_classifier")
+        frozen_zeroshot_classifier = get_zeroshot_classifier(
+            trainer.model_pretrain, processor, global_class_names, args.device)
+        _RUN_TIMER.stop("build_frozen_zs_classifier")
+    _RUN_TIMER.stop("init")
+
     # ========== 2. 增量学习循环 ==========
     history_class_names = []  # 记录所有已学类名列表的列表
     cached_seen_text_features = None
@@ -669,19 +878,23 @@ def main(args):
     global_stats_dict = {}
     global_center_means = None  # 多中心 LR-RGDA 的类中心映射，用局部变量替代 main._global_center_means
     global_gmm_memory = {}
+    lada_seen_features = []
+    lada_seen_labels = []
 
     metrics_zs = ContinualLearningMetrics(task_names)
     metrics_rgda = ContinualLearningMetrics(task_names)
     metrics_ens = ContinualLearningMetrics(task_names)
-    acc_matrix_lada = [] if args.enable_lada else None
-    acc_matrix_lada_zs = [] if args.enable_lada else None
+    metrics_lada = ContinualLearningMetrics(task_names) if args.enable_lada else None
+    metrics_lada_zs = ContinualLearningMetrics(task_names) if args.enable_lada else None
 
     for i, task_datasets in enumerate(args.dataset_sequence):
         print(f"\n" + "=" * 50)
         print(f"=== Task {i+1}: {task_datasets} ===")
         print("=" * 50)
+        _RUN_TIMER.start(f"task_{i+1:02d}_total")
 
         # --- 2a. 准备训练数据 ---
+        _RUN_TIMER.start("data_load")
         train_loaders = []
         task_class_names = []
         for d_name in task_datasets:
@@ -697,8 +910,16 @@ def main(args):
 
         merged_dataset = ConcatDataset([loader.dataset for loader in train_loaders])
         # 用于提取协方差的 loader 不打乱顺序
-        cov_loader = DataLoader(merged_dataset, batch_size=args.batch_size, shuffle=False)
-        merged_loader = DataLoader(merged_dataset, batch_size=args.batch_size, shuffle=True)
+        cov_loader = DataLoader(
+            merged_dataset, batch_size=args.batch_size, shuffle=False,
+            num_workers=args.num_workers, pin_memory=True,
+            persistent_workers=args.num_workers > 0)
+        merged_loader = DataLoader(
+            merged_dataset, batch_size=args.batch_size,
+            sampler=InfiniteSampler(merged_dataset, shuffle=True, seed=args.seed),
+            num_workers=args.num_workers, pin_memory=True,
+            persistent_workers=args.num_workers > 0)
+        _RUN_TIMER.stop("data_load")
         task_train_iterations, task_epochs = _resolve_task_train_iterations(
             args, task_datasets, len(merged_loader))
         if task_epochs is None:
@@ -712,19 +933,31 @@ def main(args):
                 i + 1, task_epochs, len(merged_loader), task_train_iterations,
             )
 
-        # --- 2b. 初始化适配器（非标准 LoRA 时在训练前初始化） ---
+        # --- 2b. 初始化适配器 ---
+        # 兼容旧 init_mode
         if args.init_mode not in ["lora_nsp", "lora_vanilla"]:
-            logging.info(f"\n=== Initializing adapters ({args.init_mode}) ===")
-            if "proj_sigma" in args.init_mode and args.init_mode != "lora_nsp":
+            logging.info(f"\n=== Initializing adapters (legacy init_mode={args.init_mode}) ===")
+            if "proj_sigma" in args.init_mode:
                 window = "tail" if "tail" in args.init_mode else "middle"
                 if trainer.covariance_history:
                     trainer.model.vision_model.initialize_adapters_from_covariance(
-                        trainer.covariance_history, window=window)
+                        trainer.covariance_history, window=window, set_p_to_identity=True)
                 else:
                     logging.info("No covariance history yet, using default random init for Task 1")
             elif "weight_svd" in args.init_mode:
                 window = "tail" if "tail" in args.init_mode else "middle"
                 trainer.model.vision_model.initialize_adapters_from_weight_svd(window=window)
+
+        # 新的 null_init_mode
+        if args.null_init_mode != "none":
+            logging.info(f"\n=== Initializing adapters (null_init_mode={args.null_init_mode}) ===")
+            if trainer.covariance_history:
+                set_p_to_identity = (args.null_init_mode == "history_init_only")
+                trainer.model.vision_model.initialize_adapters_from_covariance(
+                    trainer.covariance_history, window=args.basis_window,
+                    set_p_to_identity=set_p_to_identity)
+            else:
+                logging.info("No covariance history yet, using default random init for Task 1")
 
         # --- 2c. 训练模型 ---
         # 文本编码器调度：根据当前任务决定 text_lr
@@ -740,36 +973,45 @@ def main(args):
                 else:
                     text_lr = args.lr * args.text_lr_scale_after_task
         train_text_this_task = text_lr > 0
+        _RUN_TIMER.start("train")
         model = trainer.train(merged_loader, task_class_names, reference_loader,
                               aux_weight=args.aux_weight,
                               train_text_encoder=train_text_this_task,
                               text_lr=text_lr,
                               iterations=task_train_iterations)
+        _RUN_TIMER.stop("train")
 
         # --- 2d. 任务后处理：合入 + 协方差累积 ---
-        if args.init_mode == "lora_nsp":
-            print("\n=== Applying Null-Space Projection (NSP) ===")
-            # 图像编码器 NSP
-            text_covariances = None
-            if trainer.has_vision_lora:
-                covariances = trainer.extract_layer_covariances(cov_loader)
-            # 文本编码器 NSP（仅当本轮实际训练了文本编码器）
-            if trainer.has_text_lora and train_text_this_task:
-                text_covariances = trainer.extract_text_covariances(task_class_names)
-            trainer.finalize_task_for_incremental()
-            if trainer.has_vision_lora:
-                trainer.update_covariance_history(covariances)
-            if trainer.has_text_lora and train_text_this_task:
-                trainer.update_text_covariance_history(text_covariances)
-        elif "proj_sigma" in args.init_mode:
-            print("\n=== Proj-Σ: Extracting covariances + merging ===")
-            if trainer.has_vision_lora:
-                covariances = trainer.extract_layer_covariances(cov_loader)
-                trainer.update_covariance_history(covariances, update_projection=False)
-            trainer.finalize_task_for_incremental()
-        else:
-            print(f"\n=== Merging LoRA Weights (init_mode={args.init_mode}) ===")
-            trainer.finalize_task_for_incremental()
+        _RUN_TIMER.start("nsp_and_merge")
+
+        # 是否需要更新 runtime projection / basis
+        need_projection = (
+            args.projection_param_mode == "full" or
+            args.null_init_mode == "history_init_runtime"
+        )
+        need_basis = args.projection_param_mode in ["fixed_basis", "core_basis"]
+        print(f"\n=== Task post-processing: projection={need_projection}, basis={need_basis} ===")
+
+        text_covariances = None
+        if trainer.has_vision_lora:
+            covariances = trainer.extract_layer_covariances(cov_loader)
+        if trainer.has_text_lora and train_text_this_task:
+            text_covariances = trainer.extract_text_covariances(task_class_names)
+
+        trainer.finalize_task_for_incremental()
+
+        if trainer.has_vision_lora:
+            trainer.update_covariance_history(
+                covariances,
+                update_projection=need_projection,
+                update_basis=need_basis)
+        if trainer.has_text_lora and train_text_this_task:
+            trainer.update_text_covariance_history(
+                text_covariances,
+                update_projection=need_projection,
+                update_basis=need_basis)
+
+        _RUN_TIMER.stop("nsp_and_merge")
 
         if args.text_classifier_mode == "lada_hybrid":
             task_text_features = _encode_text_classifier_columns(
@@ -788,6 +1030,7 @@ def main(args):
                 logging.info("Reset LADA text AdaptFormer after caching current task prototypes.")
 
         # --- 2e. 提取特征并构建统计字典 ---
+        _RUN_TIMER.start("feature_extraction")
         task_features = []
         task_labels = []
         task_gmm_features = []
@@ -819,6 +1062,10 @@ def main(args):
         task_labels = torch.cat(task_labels)
         task_gmm_features = torch.cat(task_gmm_features)
         task_gmm_labels = torch.cat(task_gmm_labels)
+        if args.enable_lada:
+            lada_seen_features.append(task_features.detach().cpu())
+            lada_seen_labels.append(task_labels.detach().cpu())
+        _RUN_TIMER.stop("feature_extraction")
 
         # 构建一套或多套 compact LR-RGDA stats。主 M 用于 inline classifier；
         # 其它 M 只写入 artifact，供离线 classifier sweep 使用。
@@ -847,6 +1094,7 @@ def main(args):
         history_class_names.append(task_class_names)
 
         # --- 2f. 构建分类器 ---
+        _RUN_TIMER.start("build_classifiers")
         # 计算数据集等权的全局协方差
         dataset_balanced_cov_by_m = {
             m: _compute_dataset_balanced_global_cov(stats_dict_m, history_class_names)
@@ -909,6 +1157,34 @@ def main(args):
                 )
 
         current_num_classes = sum(len(c_names) for c_names in history_class_names)
+        lada_classifier = None
+        if args.enable_lada:
+            lada_features = torch.cat(lada_seen_features, dim=0).to(args.device)
+            lada_labels = torch.cat(lada_seen_labels, dim=0).to(args.device)
+            lada_classifier = LADAClassifier(
+                feature_dim=lada_features.shape[1],
+                beta=args.lada_beta,
+                score_mode=args.lada_score_mode,
+            )
+            lada_classifier.build_from_data(lada_features, lada_labels, k=args.lada_k)
+            lada_classifier.to(args.device)
+            if args.lada_train_iter > 0:
+                logging.info(
+                    "[LADA] Fine-tuning for %d iters on %d seen-task features "
+                    "(score_mode=%s, k=%d)...",
+                    args.lada_train_iter,
+                    lada_features.shape[0],
+                    args.lada_score_mode,
+                    args.lada_k,
+                )
+                lada_classifier.fit(
+                    lada_features,
+                    lada_labels,
+                    iterations=args.lada_train_iter,
+                    lr=args.lada_train_lr,
+                )
+        _RUN_TIMER.stop("build_classifiers")
+
         if args.save_step_artifacts:
             rgda_stats_by_m = {
                 int(m): {
@@ -935,27 +1211,42 @@ def main(args):
                 current_num_classes=current_num_classes,
                 gmm_memory=global_gmm_memory,
                 rgda_stats_by_m=rgda_stats_by_m,
+                lada_classifier=lada_classifier,
             )
 
         if args.skip_inline_eval:
+            _RUN_TIMER.stop(f"task_{i+1:02d}_total")
             continue
 
         zeroshot_classifier = _build_text_classifier(
             args, model, processor, trainer.model_pretrain, global_class_names,
-            cached_seen_text_features, args.device)
+            cached_seen_text_features, args.device,
+            frozen_classifier=frozen_zeroshot_classifier)
 
         # --- 2g. 按 LADA 协议评估所有任务 ---
         print("\n=== Evaluating Task ===")
+        _RUN_TIMER.start("evaluate")
         step_accs_zs, step_accs_rgda, step_accs_ens = {}, {}, {}
+        step_accs_lada = {} if args.enable_lada else None
+        step_accs_lada_zs = {} if args.enable_lada else None
 
         for j in range(len(args.dataset_sequence)):
             eval_datasets = args.dataset_sequence[j]
             d_name = eval_datasets[0]  # 每个 Task 只有一个数据集
             eval_label_offset = dataset_label_offsets[d_name]
 
+            te_loader, cached_c_names = test_loader_cache[d_name]
             zs_acc, rgda_acc, ens_acc, lada_acc, lada_zs_acc, c_len, _ = evaluate_dataset(
                 args, d_name, model, zeroshot_classifier, lr_rgda_classifier,
-                current_num_classes, eval_label_offset
+                current_num_classes, eval_label_offset,
+                lada_classifier=lada_classifier,
+                lada_alpha=args.lada_alpha,
+                alpha_sensitivity=args.alpha_sensitivity,
+                n_alpha_samples=args.n_alpha_samples,
+                eval_batch_size=args.eval_batch_size,
+                te_loader=te_loader,
+                c_names=cached_c_names,
+                keep_features_on_device=args.eval_keep_features_on_device,
             )
             expected_c_len = dataset_class_counts[d_name]
             if c_len != expected_c_len:
@@ -963,17 +1254,69 @@ def main(args):
                     f"Class count mismatch for {d_name}: eval={c_len}, expected={expected_c_len}"
                 )
 
-            print(f"[Tested on Task {j+1}: {d_name:<10s}] -> "
-                  f"Zero-shot: {zs_acc:5.1f}% | LR-RGDA: {rgda_acc:5.1f}% | "
-                  f"Ensemble: {ens_acc:5.1f}%")
+            message = (f"[Tested on Task {j+1}: {d_name:<10s}] -> "
+                       f"Zero-shot: {zs_acc:5.1f}% | LR-RGDA: {rgda_acc:5.1f}% | "
+                       f"Ensemble: {ens_acc:5.1f}%")
+            if args.enable_lada and lada_acc is not None and lada_zs_acc is not None:
+                message += (f" | LADA: {lada_acc:5.1f}% | "
+                            f"LADA+ZS: {lada_zs_acc:5.1f}%")
+            print(message)
 
             step_accs_zs[d_name] = zs_acc / 100.0
             step_accs_rgda[d_name] = rgda_acc / 100.0
             step_accs_ens[d_name] = ens_acc / 100.0
+            if args.enable_lada and lada_acc is not None and lada_zs_acc is not None:
+                step_accs_lada[d_name] = lada_acc / 100.0
+                step_accs_lada_zs[d_name] = lada_zs_acc / 100.0
 
         metrics_zs.update(i, step_accs_zs)
         metrics_rgda.update(i, step_accs_rgda)
         metrics_ens.update(i, step_accs_ens)
+        if args.enable_lada:
+            metrics_lada.update(i, step_accs_lada)
+            metrics_lada_zs.update(i, step_accs_lada_zs)
+
+        _RUN_TIMER.stop("evaluate")
+
+        # --- 2h. 多模态检索评估 ---
+        if args.enable_retrieval_eval:
+            recall_ks = parse_recall_ks(args.retrieval_recall_ks)
+            retrieval_datasets = [d.strip() for d in args.retrieval_datasets.split(",") if d.strip()]
+            retrieval_roots = parse_retrieval_roots(args.retrieval_roots)
+            if not hasattr(main, "_retrieval_datasets_cache"):
+                main._retrieval_datasets_cache = {}
+            if not hasattr(main, "_retrieval_results"):
+                main._retrieval_results = []
+
+            for ds_name in retrieval_datasets:
+                ds_root = retrieval_roots.get(ds_name, args.retrieval_root)
+                if ds_name not in main._retrieval_datasets_cache:
+                    try:
+                        ds = load_retrieval_dataset(ds_name, ds_root, args.retrieval_max_images)
+                        main._retrieval_datasets_cache[ds_name] = ds
+                    except FileNotFoundError as e:
+                        logging.warning("Skipping retrieval dataset %s at %s: %s", ds_name, ds_root, e)
+                        continue
+
+                ds = main._retrieval_datasets_cache[ds_name]
+                metrics = evaluate_retrieval_model(
+                    model, processor, ds, args.device,
+                    batch_size=args.retrieval_batch_size,
+                    text_batch_size=args.retrieval_batch_size * 2,
+                    num_workers=min(args.num_workers, 4),
+                    recall_ks=recall_ks,
+                )
+                row = flatten_retrieval_row(
+                    "incremental", i, task_datasets[0], ds.name,
+                    metrics, path="")
+                main._retrieval_results.append(row)
+
+                i2t = row["i2t_r@1"]
+                t2i = row["t2i_r@1"]
+                print(f"[Retrieval Task {i+1} | {ds.name}] I2T R@1={i2t:.1f}  T2I R@1={t2i:.1f}")
+
+        _RUN_TIMER.stop(f"task_{i+1:02d}_total")
+        logging.info(_RUN_TIMER.summary())
 
     if args.skip_inline_eval:
         logging.info(
@@ -992,12 +1335,25 @@ def main(args):
     _print_lada_metrics("Zero-shot Baseline", metrics_zs, task_names)
     _print_lada_metrics("LR-RGDA Only", metrics_rgda, task_names)
     _print_lada_metrics(f"Ours Ensemble (alpha={args.alpha})", metrics_ens, task_names)
+    if args.enable_lada:
+        _print_lada_metrics(
+            f"LADA Only (score={args.lada_score_mode}, k={args.lada_k})",
+            metrics_lada,
+            task_names,
+        )
+        _print_lada_metrics(
+            f"LADA+ZS (alpha={args.lada_alpha}, mode={args.ensemble_normalize})",
+            metrics_lada_zs,
+            task_names,
+        )
 
     # ========== 4. 保存结果 JSON ==========
     # 格式与 summarize_incremental_metrics.py 兼容：完整 KxK matrix，数值为 [0, 1] fraction。
     zs_stats = metrics_zs.get_summary()
     rgda_stats = metrics_rgda.get_summary()
     ens_stats = metrics_ens.get_summary()
+    lada_stats = metrics_lada.get_summary() if args.enable_lada else None
+    lada_zs_stats = metrics_lada_zs.get_summary() if args.enable_lada else None
 
     output_dir = args.output_dir or "experiments"
     os.makedirs(output_dir, exist_ok=True)
@@ -1009,11 +1365,18 @@ def main(args):
     save_path = os.path.join(output_dir, file_name)
 
     # Per-classifier result files (summarizer-compatible)
-    for suffix, tracker, stats, method_name in [
+    per_classifier_results = [
         ("_zs_results", metrics_zs, zs_stats, "zero_shot"),
         ("_rgda_results", metrics_rgda, rgda_stats, "lr_rgda"),
         ("_ens_results", metrics_ens, ens_stats, "ensemble"),
-    ]:
+    ]
+    if args.enable_lada:
+        per_classifier_results.extend([
+            ("_lada_results", metrics_lada, lada_stats, "lada"),
+            ("_lada_zs_results", metrics_lada_zs, lada_zs_stats, "lada_zs"),
+        ])
+
+    for suffix, tracker, stats, method_name in per_classifier_results:
         per_file = os.path.join(output_dir, f"{stem}{suffix}.json")
         per_result = {
             "args": {
@@ -1065,11 +1428,42 @@ def main(args):
             "ensemble": os.path.basename(file_name_ens),
         },
     }
+    if args.enable_lada:
+        save_results["metrics"].update({
+            "lada": lada_stats,
+            "lada_zs": lada_zs_stats,
+        })
+        save_results["summary_metrics"].update({
+            "lada": lada_stats,
+            "lada_zs": lada_zs_stats,
+        })
+        save_results["per_file_results"].update({
+            "lada": f"{stem}_lada_results.json",
+            "lada_zs": f"{stem}_lada_zs_results.json",
+        })
 
     with open(save_path, 'w', encoding='utf-8') as f:
         json.dump(save_results, f, indent=2, ensure_ascii=False)
 
+    # 保存检索评估结果
+    if args.enable_retrieval_eval and hasattr(main, "_retrieval_results") and main._retrieval_results:
+        retrieval_file = os.path.join(output_dir, f"{stem}_retrieval.json")
+        with open(retrieval_file, 'w', encoding='utf-8') as f:
+            json.dump(main._retrieval_results, f, indent=2)
+        logging.info(f"检索评估结果已保存至: {retrieval_file}")
+
+        # 打印检索汇总
+        print("\n=== Retrieval Evaluation Summary ===")
+        for row in main._retrieval_results:
+            print(f"  Step {row['step']} | {row['task']} | {row['dataset']} | "
+                  f"I2T R@1={row['i2t_r@1']:.1f} R@5={row['i2t_r@5']:.1f} | "
+                  f"T2I R@1={row['t2i_r@1']:.1f} R@5={row['t2i_r@5']:.1f}")
+
+    _RUN_TIMER.stop("total")
     logging.info(f"\n增量学习结果已保存至: {save_path}")
+    print("\n" + "=" * 80)
+    print(_RUN_TIMER.summary())
+    print("=" * 80)
 
 
 if __name__ == "__main__":
