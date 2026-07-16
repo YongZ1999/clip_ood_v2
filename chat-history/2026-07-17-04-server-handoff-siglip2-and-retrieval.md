@@ -24,6 +24,18 @@ python scripts/check_siglip2_compatibility.py --device cuda:0
 通过后，在一张空闲 GPU 上启动全部 6 个 E7 runs（16-shot，seeds 42/43/44；每个 seed 先 LoRA-NF、后 Native LADA）：
 bash scripts/run_siglip2_robustness.sh 0
 
+若 SigLIP2 LoRA-NF 三个 seeds 已成功完成，只重跑 Native LADA，绝不能再次运行上面的完整脚本；改用：
+
+```bash
+# 单卡顺序运行三个 Native LADA seeds
+bash scripts/run_siglip2_lada_native.sh 0
+
+# 或为并行调度分别提交三个独立 jobs（推荐）：
+bash scripts/run_siglip2_lada_native.sh 3 42
+bash scripts/run_siglip2_lada_native.sh 4 43
+bash scripts/run_siglip2_lada_native.sh 5 44
+```
+
 注意：
 - E7 只测分类 Transfer/Average/Last，不开启 retrieval；
 - SigLIP2 backbone 固定为 google/siglip2-base-patch16-224；

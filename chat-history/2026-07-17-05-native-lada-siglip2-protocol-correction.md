@@ -16,6 +16,7 @@
 - 新增 `src/lada/native_protocol.py`，集中保存 LADA 16-shot schedule；
 - 重写 `src/lada/lada_trainer.py` 的 shared native LADA 路径，使其支持 SigLIP2 features、DPT、OneCycle 和每任务重置 AdaptFormer；
 - `scripts/run_siglip2_robustness.sh` 的 LADA 子任务改为 native 入口；
+- `scripts/run_siglip2_lada_native.sh` 可只重跑 Native LADA 的三个 seeds，不重复 LoRA-NF；
 - 更新 E7 计划、服务器交接和结果模板中的结果文件名为 `lada_native`。
 
 ## 服务器动作
