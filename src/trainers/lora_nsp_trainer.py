@@ -202,7 +202,7 @@ class LoRANSPTrainer:
             gkey = _input_group_key(name)
             groups.setdefault(gkey, []).append(name)
 
-        hooks, feature_extractors, running_xtx = {}, {}, {}
+        hooks, feature_extractors, running_xtx, observation_counts = {}, {}, {}, {}
         for gkey, names in groups.items():
             extractor = FeatureExtractorHook()
             # 每组只挂一个 hook（取第一个代表）
@@ -210,8 +210,8 @@ class LoRANSPTrainer:
             hooks[gkey] = hook
             feature_extractors[gkey] = extractor
             running_xtx[gkey] = None
+            observation_counts[gkey] = 0
 
-        total_observations = 0
         for batch_data in tqdm(data_iter, desc=desc, leave=False):
             batch_input = batch_data[0] if isinstance(batch_data, (tuple, list)) else batch_data
             batch_input = batch_input.to(self.device)
@@ -229,12 +229,20 @@ class LoRANSPTrainer:
                     else:
                         running_xtx[gkey] += xtx_batch
                     feature_extractors[gkey].clear()
-                    total_observations += batch_feats.shape[0]
+                    # Each hook group observes its own input stream.  Dividing a
+                    # group's X^T X by a global count (summed over all groups)
+                    # incorrectly rescales its covariance by the number of
+                    # groups, which can interact with the eigendecomposition
+                    # stabilizer used downstream.
+                    observation_counts[gkey] += batch_feats.shape[0]
 
         covariances = {}
         for gkey, names in groups.items():
             if running_xtx[gkey] is not None:
-                cov = running_xtx[gkey] / total_observations
+                count = observation_counts[gkey]
+                if count <= 0:
+                    raise RuntimeError(f"No observations collected for covariance group {gkey}")
+                cov = running_xtx[gkey] / count
                 eps = 1e-6
                 cov = (cov + cov.t()) / 2.0
                 cov = cov + torch.eye(cov.shape[0], device=cov.device) * eps

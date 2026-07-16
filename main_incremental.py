@@ -594,6 +594,9 @@ def parse_args():
     # 参考数据集参数
     parser.add_argument("--reference_dataset", type=str, default="flickr8k",
                         help="Reference dataset for training.")
+    parser.add_argument("--reference_root", type=str,
+                        default="/data1/open_datasets/flickr8k",
+                        help="Root of the reference dataset; recorded in result JSON for reproducibility.")
     parser.add_argument("--reference_batch_size", type=int, default=32,
                         help="Batch size for reference dataset.")
     parser.add_argument("--num_workers", type=int, default=6,
@@ -1323,7 +1326,7 @@ def main(args):
                     recall_ks=recall_ks,
                 )
                 row = flatten_retrieval_row(
-                    "incremental", i, task_datasets[0], ds.name,
+                    "incremental", i + 1, task_datasets[0], ds.name,
                     metrics, path="")
                 main._retrieval_results.append(row)
 

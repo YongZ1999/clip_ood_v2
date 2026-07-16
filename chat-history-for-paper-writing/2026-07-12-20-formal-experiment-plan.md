@@ -150,6 +150,7 @@ python -u main_incremental.py \
   --nsp_eps 0.20 \
   --nsp_weight 0.02 \
   --reference_dataset flickr8k \
+  --reference_root /data1/open_datasets/flickr8k \
   --reference_batch_size 32 \
   --fd_weight 1.0 \
   --cd_weight 2.0 \

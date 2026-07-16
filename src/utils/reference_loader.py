@@ -55,7 +55,8 @@ def load_reference_dataset(args, model_pretrain, processor, device,
     try:
         # 加载 Flickr8k
         from src.utils.data import Flickr8kDataset
-        ref_dataset_obj = Flickr8kDataset(root="/data1/open_datasets/flickr8k/")
+        reference_root = getattr(args, "reference_root", "/data1/open_datasets/flickr8k")
+        ref_dataset_obj = Flickr8kDataset(root=reference_root)
         raw_ref_loader = ref_dataset_obj.return_loader(
             batch_size=32, shuffle=False, num_workers=4
         )
