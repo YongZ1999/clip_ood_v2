@@ -11,10 +11,11 @@ import torch
 from torch.utils.data import DataLoader
 
 # In[]
-def get_transforms(dataset_name, resolution=224):
+def get_transforms(dataset_name, resolution=224, model_name=None):
     """获取图像变换"""
-    mean = (0.48145466, 0.4578275, 0.40821073)
-    std = (0.26862954, 0.26130258, 0.27577711)
+    is_siglip2 = bool(model_name and str(model_name).lower().startswith("google/siglip2-"))
+    mean = (0.5, 0.5, 0.5) if is_siglip2 else (0.48145466, 0.4578275, 0.40821073)
+    std = (0.5, 0.5, 0.5) if is_siglip2 else (0.26862954, 0.26130258, 0.27577711)
     print("mean:", mean)
     print("std:", std)
 

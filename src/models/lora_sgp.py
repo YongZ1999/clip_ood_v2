@@ -543,7 +543,11 @@ class LoRACLIPVisionTransformer(nn.Module):
         self.fused_qkv = fused_qkv
         self.share_qkv = os.environ.get("SHARE_QKV", "1").lower() in ("1", "true", "yes")
         self.r = r
-        self.feature_dim = clip_vision_model.embeddings.patch_embedding.out_channels  #768
+        patch_embedding = clip_vision_model.embeddings.patch_embedding
+        self.feature_dim = getattr(
+            patch_embedding, "out_channels",
+            getattr(patch_embedding, "out_features", clip_vision_model.config.hidden_size),
+        )
 
         self.use_soft_projection = use_soft_projection
         self.weight_temp = weight_temp

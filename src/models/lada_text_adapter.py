@@ -37,7 +37,7 @@ class LADAAdaptFormer(nn.Module):
 
 
 class LADAAdaptFormerEncoderLayer(nn.Module):
-    """Wrap a HF CLIPEncoderLayer and insert AdaptFormer in the FFN residual path."""
+    """Wrap CLIP/SigLIP encoder layers and insert AdaptFormer in the FFN path."""
 
     def __init__(self, base_layer: nn.Module, bottle_dim: int = 16, scale: float = 0.1):
         super().__init__()
@@ -46,14 +46,32 @@ class LADAAdaptFormerEncoderLayer(nn.Module):
         dtype = base_layer.layer_norm2.weight.dtype
         self.adaptformer = LADAAdaptFormer(hidden_size, bottle_dim=bottle_dim, dtype=dtype)
         self.scale = float(scale)
+        self.is_siglip = "siglip" in type(base_layer).__name__.lower()
 
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: torch.Tensor,
-        causal_attention_mask: torch.Tensor,
+        attention_mask: torch.Tensor = None,
+        causal_attention_mask: torch.Tensor = None,
         output_attentions: Optional[bool] = False,
+        **kwargs,
     ):
+        if self.is_siglip:
+            residual = hidden_states
+            hidden_states = self.base_layer.layer_norm1(hidden_states)
+            hidden_states, _ = self.base_layer.self_attn(
+                hidden_states=hidden_states,
+                attention_mask=attention_mask,
+                **kwargs,
+            )
+            hidden_states = residual + hidden_states
+
+            residual = hidden_states
+            hidden_states = self.base_layer.layer_norm2(hidden_states)
+            hidden_states = self.base_layer.mlp(hidden_states)
+            hidden_states = hidden_states + self.scale * self.adaptformer(residual)
+            return residual + hidden_states
+
         residual = hidden_states
 
         hidden_states = self.base_layer.layer_norm1(hidden_states)
@@ -62,6 +80,7 @@ class LADAAdaptFormerEncoderLayer(nn.Module):
             attention_mask=attention_mask,
             causal_attention_mask=causal_attention_mask,
             output_attentions=output_attentions,
+            **kwargs,
         )
         hidden_states = residual + hidden_states
 

@@ -14,6 +14,7 @@ import random
 import numpy as np
 import torch
 import torch.nn.functional as F
+from src.models.backbone_utils import encode_text_features, tokenize_texts
 
 
 def fix_random_seed(seed=42):
@@ -39,16 +40,9 @@ def get_zeroshot_classifier(model, processor, class_names, device):
         class_text_counts.append(len(texts))
 
     with torch.no_grad():
-        text_inputs = processor(text=all_texts, return_tensors="pt", padding=True, truncation=True)
+        text_inputs = tokenize_texts(processor, all_texts, model=model)
         text_inputs = {k: v.to(device) for k, v in text_inputs.items()}
-        text_outputs = model.text_model(**text_inputs)
-        if hasattr(text_outputs, 'pooler_output') and text_outputs.pooler_output is not None:
-            pooled = text_outputs.pooler_output
-        elif hasattr(text_outputs, 'last_hidden_state'):
-            pooled = text_outputs.last_hidden_state[:, -1, :]
-        else:
-            pooled = text_outputs[1] if isinstance(text_outputs, tuple) else text_outputs
-        all_embeddings = model.text_projection(pooled)
+        all_embeddings = encode_text_features(model, text_inputs)
         all_embeddings = all_embeddings / all_embeddings.norm(dim=-1, keepdim=True)
 
     zeroshot_weights = []
