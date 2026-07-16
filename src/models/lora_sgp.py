@@ -657,7 +657,7 @@ class LoRACLIPVisionTransformer(nn.Module):
             seen_proj_ids.add(proj_id)
 
             P = build_projection(
-                cov.to(device=module.A.device),
+                cov,
                 soft_projection=self.use_soft_projection,
                 weight_temp=self.weight_temp,
                 weight_kind=self.weight_kind,
@@ -833,12 +833,11 @@ def build_projection(
         eigvals_double = eigvals_double.to(cov.device)
         eigvecs_double = eigvecs_double.to(cov.device)
     
-    # Keep the decomposition on the covariance device.  Callers move the
-    # resulting projection to the corresponding adapter parameter device.
-    # Hard-coding ``cuda`` here made otherwise valid CPU runs fail and also
-    # broke the documented CPU fallback above.
-    eigvals = eigvals_double.to(dtype=cov.dtype, device=cov.device)
-    eigvecs = eigvecs_double.to(dtype=cov.dtype, device=cov.device)
+    # 6. 计算完成后，转回模型原本的精度（float16 或 float32）
+    # [修改点] 将结果从双精度转回原精度，并移回 GPU (cuda)
+    eigvals = eigvals_double.to(dtype=cov.dtype, device='cuda')
+    eigvecs = eigvecs_double.to(dtype=cov.dtype, device='cuda')
+    # --- [修改结束] ---
     eigvals = torch.abs(eigvals)
     d = cov.size(0)
     sum_vals = eigvals.sum()
@@ -864,6 +863,8 @@ def build_projection(
         I = torch.eye(P.size(0), device=P.device, dtype=P.dtype)
         P = (1 - nsp_weight) * P + nsp_weight * I
     
+    # [修改点] 确保返回的 P 矩阵一定在显卡上，与模型权重设备对齐
+    P = P.to(device='cuda')
     return P
 
 
@@ -1005,7 +1006,7 @@ class LoRACLIPTextTransformer(nn.Module):
                 continue
             seen_proj_ids.add(proj_id)
             P = build_projection(
-                cov.to(device=module.A.device),
+                cov,
                 soft_projection=self.use_soft_projection,
                 weight_temp=self.weight_temp,
                 weight_kind=self.weight_kind,
