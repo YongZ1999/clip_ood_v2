@@ -1,6 +1,6 @@
 # 新增实验数据报告：SigLIP 2 鲁棒性与检索组件归因
 
-**状态**：E8 已由现有原始 JSON 汇总；E7 待服务器运行。  
+**状态**：E8 已由现有原始 JSON 汇总；E7 待服务器运行。任何旧 `lada_style` 统一 800-step 结果不计入本报告，E7 LADA 条目采用 Native LADA SigLIP2 port。
 **协议说明**：检索为每个任务结束后测得的图文双向 R@K。表中 mR@1 为 I2T R@1 与 T2I R@1 的等权平均；它只用于紧凑展示，不替代原始双向指标。
 
 ## E7：SigLIP 2 鲁棒性主表（待运行）
@@ -9,11 +9,11 @@ Backbone 固定为 `google/siglip2-base-patch16-224`，X-TAIL 16-shot、seeds 42
 
 | Method | Classifier | Transfer | Average | Last |
 |---|---|---:|---:|---:|
-| LADA-style SigLIP 2 | LADA+ZS | 待运行 | 待运行 | 待运行 |
+| Native LADA SigLIP 2 port | LADA+ZS | 待运行 | 待运行 | 待运行 |
 | LoRA-NF SigLIP 2 | ZS | 待运行 | 待运行 | 待运行 |
 | LoRA-NF SigLIP 2 | Ensemble | 待运行 | 待运行 | 待运行 |
 
-> LADA-style SigLIP 2 是架构适配复现（冻结视觉端、文本 AdaptFormer、label-specific prototype memory），不是 OpenAI-CLIP 官方 LADA 代码的直接运行。
+> Native LADA SigLIP 2 port 保留 LADA 的冻结视觉端、task-local 文本 AdaptFormer、label-specific memory、DPT replay、AdamW+OneCycle 与逐数据集 epoch schedule；仅适配 SigLIP2 接口，不是官方 OpenAI-CLIP 代码零修改直接运行。
 
 ## E8.1：FD/CD 组件对检索保持的影响（已有 3-seed 结果）
 

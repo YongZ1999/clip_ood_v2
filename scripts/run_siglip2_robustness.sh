@@ -34,14 +34,16 @@ for seed in "${SEEDS[@]}"; do
     --text_tuning_schedule always --fd_weight 1.0 --cd_weight 2.0 --cd_temperature 4.0 \
     --disable_lada
 
-  # LADA-style SigLIP2 port: frozen visual encoder + AdaptFormer text tuner +
-  # label-specific prototype memory.  It is architecture-adapted, not the
-  # original OpenAI-CLIP-only official LADA code.
-  python -u main_incremental.py "${COMMON[@]}" \
-    --experiment_name "E7__siglip2__lada_style__16shot__seed${seed}" --seed "$seed" \
-    --lora_type lora_nsp --init_mode lora_nsp --use_dora false \
-    --tune_vision_encoder false --tune_text_encoder true \
-    --text_adapter_type lada_adaptformer --text_adapter_dim 16 --text_adapter_scale 0.1 \
-    --text_tuning_schedule always --fd_weight 0 --cd_weight 0 \
-    --enable_lada
+  # Native LADA SigLIP2 port. It preserves the public LADA recipe: frozen
+  # visual encoder, task-local AdaptFormer, label-specific memory, DPT replay,
+  # AdamW + OneCycle, and its per-dataset 16-shot epoch schedule.
+  python -u scripts/main_incremental_lada_native.py \
+    --root "$ROOT" --model_name "$MODEL" \
+    --dataset_sequence aircraft caltech101 dtd eurosat flowers food101 mnist oxford_pets stanford_cars sun397 \
+    --num_shots 16 --batch_size 64 --eval_batch_size 128 \
+    --lr 1e-3 --weight_decay 5e-4 \
+    --lada_k 16 --prototype_k 4 --image_prototypes_weight_coef 64 \
+    --text_adapter_dim 16 --text_adapter_scale 0.1 \
+    --experiment_name "E7__siglip2__lada_native__16shot__seed${seed}" --seed "$seed" \
+    --gpu "$GPU" --output_dir "$OUT"
 done

@@ -9,7 +9,7 @@
 你在服务器上的仓库是 clip_ood_v2。请严格执行以下新增实验，不要修改、删除或覆盖任何既有 E1--E6、CLIP 主表或 LADA-CLIP 的原始结果。
 
 目标：
-1) 新增 E7：在 SigLIP 2 上测试 LoRA-NF 与 LADA-style 的 X-TAIL 16-shot 持续学习分类鲁棒性；
+1) 新增 E7：在 SigLIP 2 上测试 LoRA-NF 与 **Native LADA algorithm port** 的 X-TAIL 16-shot 持续学习分类鲁棒性；
 2) 新增 E8：从既有 retrieval JSON 汇总 FD/CD 组件和 LoRA/LoRA-Null/LoRA-NF 的检索结果。E8 不训练模型。
 
 先同步代码并运行兼容性门槛：
@@ -19,20 +19,21 @@ git pull origin v4
 python -c "import transformers; print(transformers.__version__)"
 python scripts/check_siglip2_compatibility.py --device cuda:0
 
-只有最后一条打印 `SigLIP 2 compatibility gate: passed` 才能开始正式 E7。若 checkpoint 无法加载或 LoRA-NF/LADA-style 任何一路失败，停止，不要开始正式 runs；完整保存 traceback 和 transformers 版本。必要时安装/切换到仓库实验使用的 transformers==4.57.6 后，重新运行门槛。
+只有最后一条打印 `SigLIP 2 compatibility gate: passed` 才能开始正式 E7。若 checkpoint 无法加载或 LoRA-NF/LADA AdaptFormer 路径失败，停止，不要开始正式 runs；完整保存 traceback 和 transformers 版本。必要时安装/切换到仓库实验使用的 transformers==4.57.6 后，重新运行门槛。
 
-通过后，在一张空闲 GPU 上启动全部 6 个 E7 runs（16-shot，seeds 42/43/44；每个 seed 先 LoRA-NF、后 LADA-style）：
+通过后，在一张空闲 GPU 上启动全部 6 个 E7 runs（16-shot，seeds 42/43/44；每个 seed 先 LoRA-NF、后 Native LADA）：
 bash scripts/run_siglip2_robustness.sh 0
 
 注意：
 - E7 只测分类 Transfer/Average/Last，不开启 retrieval；
 - SigLIP2 backbone 固定为 google/siglip2-base-patch16-224；
-- `LADA-style SigLIP 2` 是冻结视觉端 + text AdaptFormer + label-specific prototype memory 的架构适配复现，绝不能称为“官方 LADA 在 SigLIP2 上的直接复现”；
+- Native LADA SigLIP2 port 保留原 LADA 的冻结视觉端、task-local text AdaptFormer、label-specific memory、DPT replay、AdamW+OneCycle 与各数据集 epoch schedule；仅适配 SigLIP2 接口，不能称为官方代码零修改直接运行；
+- 任何此前以 `E7__siglip2__lada_style__...` 命名、使用统一 800 iterations 的结果都属于旧 controlled-budget 版本，不能写入 E7 主表；
 - 不要为 E7 重跑 full-shot，也不要重跑 E1--E6 或官方 LADA-CLIP。
 
 6 个 run 全部完成后，确认下列六个文件存在且每个都含完整 T/A/L：
 experiments/paper_formal/E7_siglip2/E7__siglip2__lora_nf__16shot__seed{42,43,44}_ens_results.json
-experiments/paper_formal/E7_siglip2/E7__siglip2__lada_style__16shot__seed{42,43,44}_lada_zs_results.json
+experiments/paper_formal/E7_siglip2/E7__siglip2__lada_native__16shot__seed{42,43,44}_lada_zs_results.json
 
 然后汇总 E7：
 python scripts/summarize_continual_metrics.py \
@@ -40,9 +41,9 @@ python scripts/summarize_continual_metrics.py \
   --input 'LoRA-NF Ensemble=experiments/paper_formal/E7_siglip2/E7__siglip2__lora_nf__16shot__seed42_ens_results.json' \
   --input 'LoRA-NF Ensemble=experiments/paper_formal/E7_siglip2/E7__siglip2__lora_nf__16shot__seed43_ens_results.json' \
   --input 'LoRA-NF Ensemble=experiments/paper_formal/E7_siglip2/E7__siglip2__lora_nf__16shot__seed44_ens_results.json' \
-  --input 'LADA-style+ZS=experiments/paper_formal/E7_siglip2/E7__siglip2__lada_style__16shot__seed42_lada_zs_results.json' \
-  --input 'LADA-style+ZS=experiments/paper_formal/E7_siglip2/E7__siglip2__lada_style__16shot__seed43_lada_zs_results.json' \
-  --input 'LADA-style+ZS=experiments/paper_formal/E7_siglip2/E7__siglip2__lada_style__16shot__seed44_lada_zs_results.json'
+  --input 'Native LADA+ZS=experiments/paper_formal/E7_siglip2/E7__siglip2__lada_native__16shot__seed42_lada_zs_results.json' \
+  --input 'Native LADA+ZS=experiments/paper_formal/E7_siglip2/E7__siglip2__lada_native__16shot__seed43_lada_zs_results.json' \
+  --input 'Native LADA+ZS=experiments/paper_formal/E7_siglip2/E7__siglip2__lada_native__16shot__seed44_lada_zs_results.json'
 
 E8 不要重跑任何训练。只执行下列只读汇总，并把生成的 Markdown/JSON 交回：
 python scripts/summarize_retrieval_ablation.py \

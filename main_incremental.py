@@ -55,6 +55,7 @@ from src.trainers.lora_nsp_trainer import LoRANSPTrainer
 from src.classifiers.lr_rgda_classifier import LRRGDAClassifier
 from src.classifiers.gaussian_statistics import build_multi_center_stats_dict
 from src.lada import LADAClassifier
+from src.lada.native_protocol import LADA_16SHOT_EPOCHS
 from src.utils.reference_loader import load_reference_dataset
 from src.utils.retrieval_eval import (
     evaluate_retrieval_model,
@@ -115,20 +116,6 @@ class StageTimer:
 
 # Global timer for the whole run.
 _RUN_TIMER = StageTimer()
-
-
-LADA_16SHOT_EPOCHS = {
-    "aircraft": 40,
-    "caltech101": 10,
-    "dtd": 30,
-    "eurosat": 100,
-    "flowers": 30,
-    "food101": 5,
-    "mnist": 200,
-    "oxford_pets": 10,
-    "stanford_cars": 30,
-    "sun397": 10,
-}
 
 
 def _parse_epoch_overrides(spec):

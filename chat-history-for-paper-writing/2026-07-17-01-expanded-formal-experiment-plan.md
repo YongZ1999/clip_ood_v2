@@ -5,7 +5,7 @@
 
 ## 1. 新增实验的目标与边界
 
-论文原有证据只覆盖 OpenAI CLIP ViT-B/16。新增 **E7** 检验 LoRA-NF 是否依赖这一特定 backbone：在 X-TAIL 16-shot、相同十任务顺序下，比较 SigLIP 2 上的 LADA-style 基线和 LoRA-NF，并报告 Transfer / Average / Last。
+论文原有证据只覆盖 OpenAI CLIP ViT-B/16。新增 **E7** 检验 LoRA-NF 是否依赖这一特定 backbone：在 X-TAIL 16-shot、相同十任务顺序下，比较 SigLIP 2 上的 Native LADA algorithm port 和 LoRA-NF，并报告 Transfer / Average / Last。
 
 同时，原始 E2--E5 的许多运行已经保存每个任务后的 `*_retrieval.json`，但 `paper_experiment_results.md` 没有系统报告它们。新增 **E8** 只聚合这些已存在的机器可读结果，回答 FD、CD 与前向 NSP 对检索保持的作用；它不是新的 encoder 训练实验。
 
@@ -20,7 +20,8 @@ SigLIP 2 checkpoint 固定为 `google/siglip2-base-patch16-224`。这是 SigLIP 
 | Backbone | `google/siglip2-base-patch16-224` |
 | 数据 | X-TAIL，16-shot，十任务固定顺序 |
 | Seeds | `42, 43, 44` |
-| 训练预算 | 800 iterations/task |
+| LoRA-NF 训练预算 | 原 LoRA-NF 统一 800 iterations/task |
+| LADA 训练预算 | 原 LADA 16-shot 逐数据集 epoch schedule（40/10/30/100/30/5/200/10/30/10） |
 | LoRA-NF | rank=4，q/k/v/out/fc1/fc2，hard NSP，`eps=0.20`，`weight=0.02` |
 | 蒸馏（LoRA-NF） | FD=1，CD=2，temperature=4 |
 | 分类器（LoRA-NF） | LR-RGDA + ZS，`num_centers=4`，maxshift ensemble |
@@ -30,11 +31,11 @@ SigLIP 2 checkpoint 固定为 `google/siglip2-base-patch16-224`。这是 SigLIP 
 
 | 方法 | 实现与主报告项 | 训练 runs |
 |---|---|---:|
-| LADA-style SigLIP 2 | 冻结视觉编码器、文本 AdaptFormer、label-specific prototype memory；报告 `LADA+ZS` T/A/L | 3 |
+| Native LADA SigLIP 2 port | 冻结视觉编码器、task-local 文本 AdaptFormer、label-specific memory、DPT replay、AdamW+OneCycle、原 LADA epoch schedule；报告 `LADA+ZS` T/A/L | 3 |
 | LoRA-NF SigLIP 2 | 完整 LoRA-NF + FD/CD + LR-RGDA ensemble；报告 Ens T/A/L | 3 |
 | **总计** | 16-shot，3 seeds | **6** |
 
-LADA 官方仓库绑定 OpenAI CLIP 的 tokenizer、visual encoder、DPT 和权重结构，不能直接加载 SigLIP 2。因此 E7 的 LADA 项必须写作 **“LADA-style architecture-adapted reimplementation on SigLIP 2”**，不能声称是官方 LADA checkpoint 或与 CLIP 官方复现完全同一实现。其目的仍是测试两种持续学习策略跨 backbone 的相对趋势。
+LADA 官方仓库绑定 OpenAI CLIP 的 tokenizer 和模块接口，不能直接加载 SigLIP 2。因此 E7 使用 **“Native LADA algorithm port on SigLIP 2”**：保留 LADA 的训练机制与超参数配方，只为 SigLIP2 的 encoder/tokenizer API 做最小结构适配。它不能称为“官方代码零修改运行”，但也不能再写作统一 800-step 的 LADA-style controlled baseline。
 
 不为 E7 增加 full-shot 或检索：本轮新增问题仅是主表分类鲁棒性，增加这些项目会扩大计算预算而不直接回答该问题。
 
@@ -54,7 +55,7 @@ bash scripts/run_siglip2_robustness.sh 0
 
 ```text
 E7__siglip2__lora_nf__16shot__seed{42,43,44}_ens_results.json
-E7__siglip2__lada_style__16shot__seed{42,43,44}_lada_zs_results.json
+E7__siglip2__lada_native__16shot__seed{42,43,44}_lada_zs_results.json
 ```
 
 聚合命令：
@@ -65,9 +66,9 @@ python scripts/summarize_continual_metrics.py \
   --input 'LoRA-NF Ensemble=experiments/paper_formal/E7_siglip2/E7__siglip2__lora_nf__16shot__seed42_ens_results.json' \
   --input 'LoRA-NF Ensemble=experiments/paper_formal/E7_siglip2/E7__siglip2__lora_nf__16shot__seed43_ens_results.json' \
   --input 'LoRA-NF Ensemble=experiments/paper_formal/E7_siglip2/E7__siglip2__lora_nf__16shot__seed44_ens_results.json' \
-  --input 'LADA-style+ZS=experiments/paper_formal/E7_siglip2/E7__siglip2__lada_style__16shot__seed42_lada_zs_results.json' \
-  --input 'LADA-style+ZS=experiments/paper_formal/E7_siglip2/E7__siglip2__lada_style__16shot__seed43_lada_zs_results.json' \
-  --input 'LADA-style+ZS=experiments/paper_formal/E7_siglip2/E7__siglip2__lada_style__16shot__seed44_lada_zs_results.json'
+  --input 'Native LADA+ZS=experiments/paper_formal/E7_siglip2/E7__siglip2__lada_native__16shot__seed42_lada_zs_results.json' \
+  --input 'Native LADA+ZS=experiments/paper_formal/E7_siglip2/E7__siglip2__lada_native__16shot__seed43_lada_zs_results.json' \
+  --input 'Native LADA+ZS=experiments/paper_formal/E7_siglip2/E7__siglip2__lada_native__16shot__seed44_lada_zs_results.json'
 ```
 
 ## 3. E8：检索组件归因（不重训）
@@ -102,7 +103,7 @@ python scripts/summarize_continual_metrics.py \
 
 ## 4. 论文主张边界
 
-E7 若 LoRA-NF 在 SigLIP 2 上仍优于 LADA-style 基线，可写“在第二个视觉语言 backbone 上观察到一致趋势”；不能只凭两个 backbone 写“与 backbone 无关”。E8 若检索差异不跨 MSCOCO/Flickr 一致，应报告其稳定性界限，不将分类消融的正效应自动归因成检索改善。
+E7 若 LoRA-NF 在 SigLIP 2 上仍优于 Native LADA algorithm port，可写“在第二个视觉语言 backbone 上观察到一致趋势”；不能只凭两个 backbone 写“与 backbone 无关”。E8 若检索差异不跨 MSCOCO/Flickr 一致，应报告其稳定性界限，不将分类消融的正效应自动归因成检索改善。
 
 ## 5. 结果写入位置
 
