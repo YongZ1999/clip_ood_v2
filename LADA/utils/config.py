@@ -51,3 +51,19 @@ _C.beta = 1.0
 _C.zero_shot = False  # zero-shot CLIP
 _C.continue_train = False
 _C.continue_train_first = False
+
+# Optional in-process retrieval evaluation.  This must run before the
+# per-task process exits because the current Text_Tuner is not checkpointed by
+# the official continual-learning recipe.
+_C.retrieval_eval = False
+_C.retrieval_datasets = "mscoco_2014_5k,flickr30k_hf"
+_C.retrieval_root = "/data/home/zengyong1/dataset"
+_C.retrieval_roots = (
+    "mscoco_2014_5k=/data/home/zengyong1/dataset/mscoco_2014_5k_test_hf,"
+    "flickr30k_hf=/data/home/zengyong1/dataset/flickr30k_hf"
+)
+_C.retrieval_batch_size = 128
+_C.retrieval_recall_ks = "1,5,10"
+_C.retrieval_max_images = 0
+_C.retrieval_similarity_chunk_size = 512
+_C.retrieval_include_frozen = True

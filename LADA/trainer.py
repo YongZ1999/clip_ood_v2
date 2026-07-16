@@ -18,6 +18,7 @@ from utils.meter import AverageMeter
 from utils.losses import *
 from utils.evaluator import Evaluator
 from utils.sampler import sample_from_prototypes
+from retrieval_eval import evaluate_and_save_lada_retrieval
 
 
 def load_clip_to_cpu(backbone_name, prec):
@@ -297,6 +298,10 @@ class Trainer:
         if cfg.continue_train:
             self.test_wo_selector()
             # self.test_w_selector()
+        if cfg.retrieval_eval:
+            evaluate_and_save_lada_retrieval(
+                cfg, self.model, clip.tokenize, self.device
+            )
 
     @torch.no_grad()
     def test_zero_shot(self):

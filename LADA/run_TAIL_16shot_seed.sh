@@ -3,7 +3,15 @@
 set -e
 SEED=$1; GPU=$2; DIR="LADA_official_s${SEED}"
 
-OPTS="num_shots 16 root /data1/open_datasets/X-TAIL seed $SEED gpu $GPU output_dir $DIR"
+# Set LADA_RETRIEVAL_EVAL=1 to measure the current official LADA text tuner
+# after every task.  It is intentionally opt-in so the original classification
+# reproduction command retains its runtime behavior.
+RETRIEVAL_OPTS=""
+if [ "${LADA_RETRIEVAL_EVAL:-0}" = "1" ]; then
+  RETRIEVAL_OPTS="retrieval_eval True"
+fi
+
+OPTS="num_shots 16 root /data1/open_datasets/X-TAIL seed $SEED gpu $GPU output_dir $DIR $RETRIEVAL_OPTS"
 export OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 NUMEXPR_NUM_THREADS=4
 
 python3 -u main.py -d TAIL -m clip_vit_b16 $OPTS dataset aircraft num_epochs 40 continue_train_first True

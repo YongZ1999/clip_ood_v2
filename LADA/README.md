@@ -99,6 +99,21 @@ bash scripts/run_TAIL_fullshot_order2.sh
 
 Each script will **automatically run the full experimental pipeline**, including training and evaluation, and **output the final accuracy metrics**.
 
+### Optional in-process image-text retrieval
+
+The official continual-learning launcher creates one process per task and does
+not persist the current text AdaptFormer in its checkpoint. To measure actual
+LADA retrieval, enable the in-process evaluator when launching a seed:
+
+```bash
+LADA_RETRIEVAL_EVAL=1 bash run_TAIL_16shot_seed.sh 42 0
+```
+
+It writes `output/LADA_official_s42/retrieval.json` with one `lada` row and an
+exact in-process `frozen_clip` row for each task/dataset, plus LADA Retrieval
+Average and Last summaries. The evaluator reuses the project-wide COCO/Flickr
+positive-pair and R@K implementation.
+
 ### Example Output (16-shot Order I)
 ```bash
 ===========================================================================
