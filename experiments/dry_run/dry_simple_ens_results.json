@@ -1,0 +1,40 @@
+{
+  "args": {
+    "task_sequence": [
+      "aircraft",
+      "caltech101"
+    ],
+    "seed": 42,
+    "method": "ensemble",
+    "eval_max_samples": 0,
+    "num_shots": 16,
+    "full_shot": false
+  },
+  "accuracy_matrix": [
+    [
+      0.32043203711509705,
+      0.8332657217979431
+    ],
+    [
+      0.320732057094574,
+      0.864503026008606
+    ]
+  ],
+  "metrics": {
+    "transfer": 83.32657217979431,
+    "average": 58.4733210504055,
+    "last": 59.261754155159
+  },
+  "per_task_metrics": {
+    "aircraft": {
+      "transfer": 0.0,
+      "average": 32.05820471048355,
+      "last": 32.0732057094574
+    },
+    "caltech101": {
+      "transfer": 83.32657217979431,
+      "average": 84.88843739032745,
+      "last": 86.4503026008606
+    }
+  }
+}

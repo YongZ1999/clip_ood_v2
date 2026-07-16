@@ -32,7 +32,7 @@
 检索评估：
     使用 --enable_retrieval_eval 开启每任务后的多模态检索评估。
     首次使用前运行 scripts/download_retrieval_datasets.sh 下载 COCO/Flickr30K 到共享路径。
-    数据集默认路径: /mnt/raoxuan/open_datasets/ (可通过 --retrieval_root / --retrieval_roots 修改)
+    数据集默认路径: /data/home/zengyong1/dataset/ (可通过 --retrieval_root / --retrieval_roots 修改)
 """
 
 import os
@@ -71,7 +71,7 @@ from src.utils.main_utils import (
     evaluate_dataset,
 )
 from src.utils.continual_metrics import ContinualLearningMetrics
-from utils_data import get_xtail_trainloader, get_xtail_classnames, get_transforms
+from src.utils.data import get_xtail_trainloader, get_xtail_classnames, get_transforms
 
 
 class StageTimer:
@@ -581,6 +581,10 @@ def parse_args():
                         help="Weight parameter for NSP.")
     parser.add_argument("--use_soft_projection", action="store_true", default=False,
                         help="Use soft projection (eigenvalue-weighted) instead of hard subspace projection.")
+    parser.add_argument("--use_gradient_projection", action="store_true", default=False,
+                        help="Use gradient projection (GPM-style) instead of forward NSP filtering. "
+                             "When enabled, LoRA forward is standard (no P), and gradients are "
+                             "projected via NSP after backward.")
     parser.add_argument("--weight_temp", type=float, default=1.0,
                         help="Temperature parameter for weight.")
     parser.add_argument("--weight_kind", type=str, default="log1p")
@@ -620,8 +624,10 @@ def parse_args():
     parser.add_argument("--alpha", type=float, default=0.05,
                         help="Weight for LR-RGDA classifier in ensemble (paper: 0.05).")
     parser.add_argument("--alpha_sensitivity", action="store_true", default=True,
-                        help="Enable per-task alpha sensitivity sweep (21 points 0.0-1.0). "
-                             "Use --no-alpha_sensitivity to disable.")
+                        help="Enable per-task alpha sensitivity sweep (21 points 0.0-1.0).")
+    parser.add_argument("--no-alpha_sensitivity", action="store_false",
+                        dest="alpha_sensitivity",
+                        help="Disable per-task alpha sensitivity sweep.")
     parser.add_argument("--n_alpha_samples", type=int, default=21,
                         help="Number of alpha points in sensitivity sweep.")
     parser.add_argument("--alpha_sweep_batch_size", type=int, default=512,
@@ -735,15 +741,15 @@ def parse_args():
     parser.add_argument("--retrieval_datasets", type=str, default="mscoco_2014_5k,flickr30k_hf",
                         help="Comma-separated retrieval dataset names: flickr8k, coco_val2014, coco_val2014_hf, "
                              "flickr30k_hf, flickr30k_cn, mscoco_2014_5k (default: mscoco_2014_5k,flickr30k_hf).")
-    parser.add_argument("--retrieval_root", type=str, default="/mnt/raoxuan/open_datasets",
+    parser.add_argument("--retrieval_root", type=str, default="/data/home/zengyong1/dataset",
                         help="Fallback root for retrieval datasets.")
     parser.add_argument("--retrieval_roots", type=str,
                         default="flickr8k=/mnt/open_datasets/flickr8k,"
                                 "coco_val2014=/mnt/raoxuan/open_datasets/coco_val2014,"
                                 "coco_val2014_hf=/mnt/raoxuan/open_datasets/coco_val2014_hf,"
-                                "flickr30k_hf=/mnt/raoxuan/open_datasets/flickr30k_hf,"
+                                "flickr30k_hf=/data/home/zengyong1/dataset/flickr30k_hf,"
                                 "flickr30k_cn=/mnt/open_datasets/chinese-clip-eval/Flickr30k-CN,"
-                                "mscoco_2014_5k=/mnt/raoxuan/open_datasets/mscoco_2014_5k_test_hf",
+                                "mscoco_2014_5k=/data/home/zengyong1/dataset/mscoco_2014_5k_test_hf",
                         help="Comma-separated dataset=/path entries for per-dataset retrieval roots.")
     parser.add_argument("--retrieval_batch_size", type=int, default=128,
                         help="Batch size for retrieval evaluation.")
@@ -978,19 +984,25 @@ def main(args):
                               aux_weight=args.aux_weight,
                               train_text_encoder=train_text_this_task,
                               text_lr=text_lr,
-                              iterations=task_train_iterations)
+                              iterations=task_train_iterations,
+                              use_gradient_projection=args.use_gradient_projection)
         _RUN_TIMER.stop("train")
 
         # --- 2d. 任务后处理：合入 + 协方差累积 ---
         _RUN_TIMER.start("nsp_and_merge")
 
         # 是否需要更新 runtime projection / basis
+        # 梯度投影模式下，不更新前向 P（前向是标准 LoRA），但更新梯度投影矩阵
+        use_grad_proj = args.use_gradient_projection
         need_projection = (
-            args.projection_param_mode == "full" or
-            args.null_init_mode == "history_init_runtime"
+            not use_grad_proj and (
+                args.projection_param_mode == "full" or
+                args.null_init_mode == "history_init_runtime"
+            )
         )
-        need_basis = args.projection_param_mode in ["fixed_basis", "core_basis"]
-        print(f"\n=== Task post-processing: projection={need_projection}, basis={need_basis} ===")
+        need_basis = not use_grad_proj and args.projection_param_mode in ["fixed_basis", "core_basis"]
+        print(f"\n=== Task post-processing: projection={need_projection}, basis={need_basis}, "
+              f"grad_proj={use_grad_proj} ===")
 
         text_covariances = None
         if trainer.has_vision_lora:
@@ -1010,6 +1022,10 @@ def main(args):
                 text_covariances,
                 update_projection=need_projection,
                 update_basis=need_basis)
+
+        # 梯度投影模式：从协方差历史构建独立的梯度投影矩阵
+        if use_grad_proj:
+            trainer.update_gradient_projection_matrices()
 
         _RUN_TIMER.stop("nsp_and_merge")
 
@@ -1385,6 +1401,7 @@ def main(args):
                 "method": method_name,
                 "eval_max_samples": args.eval_max_samples,
                 "num_shots": args.num_shots,
+                "full_shot": args.full_shot,
             },
             "accuracy_matrix": tracker.get_accuracy_matrix().tolist(),
             "metrics": {
@@ -1410,6 +1427,7 @@ def main(args):
             "method": args.lora_type,
             "eval_max_samples": args.eval_max_samples,
             "num_shots": args.num_shots,
+            "full_shot": args.full_shot,
         },
         "accuracy_matrix": metrics_ens.get_accuracy_matrix().tolist(),
         "metrics": {

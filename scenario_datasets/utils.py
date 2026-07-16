@@ -316,7 +316,7 @@ class DatasetBase:
         Return:
             data_sources: each individual is a list containing Datum objects. (Sampled)
         """
-        if num_shots < 1:
+        if num_shots is None or num_shots < 1:
             if len(data_sources) == 1:
                 return data_sources[0]
             return data_sources

@@ -1,0 +1,130 @@
+{
+    "mode": "Incremental Learning",
+    "timestamp": "2026-06-15 17:56:22",
+    "dataset_order": [
+        "aircraft"
+    ],
+    "arguments": {
+        "id_datasets": [
+            "aircraft",
+            "caltech101",
+            "dtd",
+            "eurosat",
+            "flowers",
+            "food101",
+            "mnist",
+            "oxford_pets",
+            "stanford_cars",
+            "sun397"
+        ],
+        "root": "/data1/open_datasets/X-TAIL",
+        "num_shots": 16,
+        "full_shot": false,
+        "batch_size": 32,
+        "max_num_per_test_dataset": 1000,
+        "dataset_sequence": [
+            [
+                "aircraft"
+            ]
+        ],
+        "seed": 42,
+        "gpu": 0,
+        "device": "cuda:0",
+        "iterations": 10,
+        "lr": 0.0001,
+        "weight_decay": 3e-05,
+        "lora_rank": 4,
+        "lora_alpha": null,
+        "lora_dropout": 0.0,
+        "lora_type": "lora_nsp",
+        "init_mode": "lora_nsp",
+        "nsp_eps": 0.05,
+        "nsp_weight": 0.02,
+        "weight_temp": 1.0,
+        "weight_kind": "log1p",
+        "weight_p": 1.0,
+        "reference_dataset": "flickr8k",
+        "reference_batch_size": 32,
+        "num_workers": 6,
+        "fd_weight": 1.0,
+        "cd_weight": 1.0,
+        "aux_weight": 1.0,
+        "sce_a": 0.5,
+        "sce_b": 0.5,
+        "alpha": 0.05,
+        "temperature": 1.0,
+        "adaptive_ensemble": false,
+        "classifier_feature_transform": "test",
+        "rgda_rank": 32,
+        "rgda_alpha1": 0.2,
+        "rgda_alpha2": 2.0,
+        "rgda_alpha3": 0.5,
+        "tune_text_encoder": true,
+        "text_lora_rank": 4,
+        "max_zs_classes": 128,
+        "tune_vision_encoder": true,
+        "text_tuning_schedule": "low_lr_after",
+        "text_schedule_switch_task": 1,
+        "text_lr_scale_after_task": 0.2,
+        "num_centers": 4
+    },
+    "metrics": {
+        "zero_shot": {
+            "raw_matrix": [
+                [
+                    24.30242896080017
+                ]
+            ],
+            "transfer": [
+                24.30242896080017
+            ],
+            "transfer_total_avg": 24.30242896080017,
+            "average_per_task": [
+                24.30242896080017
+            ],
+            "average_total_avg": 24.30242896080017,
+            "last": [
+                24.30242896080017
+            ],
+            "last_total_avg": 24.30242896080017
+        },
+        "lr_rgda": {
+            "raw_matrix": [
+                [
+                    31.293126940727234
+                ]
+            ],
+            "transfer": [
+                31.293126940727234
+            ],
+            "transfer_total_avg": 31.293126940727234,
+            "average_per_task": [
+                31.293126940727234
+            ],
+            "average_total_avg": 31.293126940727234,
+            "last": [
+                31.293126940727234
+            ],
+            "last_total_avg": 31.293126940727234
+        },
+        "ours_ensemble": {
+            "raw_matrix": [
+                [
+                    29.07290756702423
+                ]
+            ],
+            "transfer": [
+                29.07290756702423
+            ],
+            "transfer_total_avg": 29.07290756702423,
+            "average_per_task": [
+                29.07290756702423
+            ],
+            "average_total_avg": 29.07290756702423,
+            "last": [
+                29.07290756702423
+            ],
+            "last_total_avg": 29.07290756702423
+        }
+    }
+}

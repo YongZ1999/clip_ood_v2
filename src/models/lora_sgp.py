@@ -1014,6 +1014,7 @@ class LoRACLIPTextTransformer(nn.Module):
                 nsp_eps=self.nsp_eps,
                 nsp_weight=self.nsp_weight,
             )
+            P = P.to(device=module.A.device, dtype=module.A.dtype)
             self.lora_modules[name].P = FixedProjection(P)
 
     @torch.no_grad()

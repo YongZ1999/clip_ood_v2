@@ -1,0 +1,303 @@
+{
+  "mode": "Incremental Learning",
+  "timestamp": "2026-06-16 19:19:45",
+  "dataset_order": [
+    "aircraft",
+    "caltech101"
+  ],
+  "arguments": {
+    "id_datasets": [
+      "aircraft",
+      "caltech101",
+      "dtd",
+      "eurosat",
+      "flowers",
+      "food101",
+      "mnist",
+      "oxford_pets",
+      "stanford_cars",
+      "sun397"
+    ],
+    "root": "/data1/open_datasets/X-TAIL",
+    "num_shots": 16,
+    "full_shot": false,
+    "batch_size": 32,
+    "eval_max_samples": 0,
+    "dataset_sequence": [
+      [
+        "aircraft"
+      ],
+      [
+        "caltech101"
+      ]
+    ],
+    "seed": 42,
+    "gpu": 0,
+    "device": "cuda:0",
+    "iterations": 10,
+    "lr": 0.0001,
+    "weight_decay": 3e-05,
+    "lora_rank": 4,
+    "lora_alpha": null,
+    "lora_dropout": 0.0,
+    "lora_type": "lora_nsp",
+    "init_mode": "lora_nsp",
+    "nsp_eps": 0.05,
+    "nsp_weight": 0.02,
+    "weight_temp": 1.0,
+    "weight_kind": "log1p",
+    "weight_p": 1.0,
+    "reference_dataset": "flickr8k",
+    "reference_batch_size": 32,
+    "num_workers": 6,
+    "fd_weight": 1.0,
+    "cd_weight": 1.0,
+    "aux_weight": 1.0,
+    "sce_a": 0.5,
+    "sce_b": 0.5,
+    "alpha": 0.05,
+    "temperature": 1.0,
+    "adaptive_ensemble": false,
+    "alpha_sweep": true,
+    "classifier_feature_transform": "test",
+    "rgda_rank": 32,
+    "rgda_alpha1": 0.2,
+    "rgda_alpha2": 2.0,
+    "rgda_alpha3": 0.5,
+    "rgda_train_iter": 5,
+    "rgda_train_lr": 0.01,
+    "tune_text_encoder": true,
+    "text_lora_rank": 4,
+    "max_zs_classes": 128,
+    "tune_vision_encoder": true,
+    "text_tuning_schedule": "low_lr_after",
+    "text_schedule_switch_task": 1,
+    "text_lr_scale_after_task": 0.2,
+    "num_centers": 4,
+    "enable_lada": false,
+    "lada_k": 16,
+    "lada_beta": 1.0,
+    "lada_alpha": 0.05,
+    "lada_train_iter": 0,
+    "lada_train_lr": 0.01,
+    "use_gaussian_features": false,
+    "gmm_k": 4,
+    "gmm_sample_mode": "mean",
+    "gmm_fit_space": "raw",
+    "gaussian_samples_per_class": 16,
+    "output_dir": "experiments",
+    "experiment_name": null
+  },
+  "alpha_sweep": {
+    "best_alpha": 0.4,
+    "best_ensemble": 61.980000000000004,
+    "final_step_data": {
+      "0.0": {
+        "aircraft": 24.45,
+        "caltech101": 82.43
+      },
+      "0.05": {
+        "aircraft": 30.03,
+        "caltech101": 85.11
+      },
+      "0.1": {
+        "aircraft": 32.85,
+        "caltech101": 85.92
+      },
+      "0.15": {
+        "aircraft": 34.44,
+        "caltech101": 86.9
+      },
+      "0.2": {
+        "aircraft": 35.28,
+        "caltech101": 87.3
+      },
+      "0.25": {
+        "aircraft": 35.76,
+        "caltech101": 87.79
+      },
+      "0.3": {
+        "aircraft": 36.03,
+        "caltech101": 87.83
+      },
+      "0.35": {
+        "aircraft": 36.15,
+        "caltech101": 87.79
+      },
+      "0.4": {
+        "aircraft": 36.09,
+        "caltech101": 87.87
+      },
+      "0.45": {
+        "aircraft": 35.88,
+        "caltech101": 87.75
+      },
+      "0.5": {
+        "aircraft": 35.88,
+        "caltech101": 87.95
+      },
+      "0.55": {
+        "aircraft": 35.46,
+        "caltech101": 88.19
+      },
+      "0.6": {
+        "aircraft": 35.16,
+        "caltech101": 88.32
+      },
+      "0.65": {
+        "aircraft": 35.16,
+        "caltech101": 88.19
+      },
+      "0.7": {
+        "aircraft": 34.86,
+        "caltech101": 88.24
+      },
+      "0.75": {
+        "aircraft": 34.74,
+        "caltech101": 88.07
+      },
+      "0.8": {
+        "aircraft": 34.47,
+        "caltech101": 88.11
+      },
+      "0.85": {
+        "aircraft": 34.32,
+        "caltech101": 88.03
+      },
+      "0.9": {
+        "aircraft": 34.02,
+        "caltech101": 87.91
+      },
+      "0.95": {
+        "aircraft": 33.84,
+        "caltech101": 87.99
+      },
+      "1.0": {
+        "aircraft": 33.81,
+        "caltech101": 87.75
+      }
+    }
+  },
+  "args": {
+    "task_sequence": [
+      "aircraft",
+      "caltech101"
+    ],
+    "seed": 42,
+    "method": "lora_nsp",
+    "eval_max_samples": 0,
+    "num_shots": 16
+  },
+  "accuracy_matrix": [
+    [
+      31.233122944831848,
+      0.0
+    ],
+    [
+      30.03300130367279,
+      85.11156439781189
+    ]
+  ],
+  "metrics": {
+    "zero_shot": {
+      "raw_matrix": [
+        [
+          24.30242896080017
+        ],
+        [
+          24.452444911003113,
+          82.43407607078552
+        ]
+      ],
+      "transfer": [
+        0.0,
+        24.452444911003113
+      ],
+      "transfer_total_avg": 24.452444911003113,
+      "average_per_task": [
+        24.377436935901642,
+        82.43407607078552
+      ],
+      "average_total_avg": 53.40575650334358,
+      "last": [
+        24.452444911003113,
+        82.43407607078552
+      ],
+      "last_total_avg": 53.44326049089432
+    },
+    "lr_rgda": {
+      "raw_matrix": [
+        [
+          36.24362349510193
+        ],
+        [
+          33.81338119506836,
+          87.74847984313965
+        ]
+      ],
+      "transfer": [
+        0.0,
+        33.81338119506836
+      ],
+      "transfer_total_avg": 33.81338119506836,
+      "average_per_task": [
+        35.028502345085144,
+        87.74847984313965
+      ],
+      "average_total_avg": 61.388491094112396,
+      "last": [
+        33.81338119506836,
+        87.74847984313965
+      ],
+      "last_total_avg": 60.780930519104004
+    },
+    "ours_ensemble": {
+      "raw_matrix": [
+        [
+          31.233122944831848
+        ],
+        [
+          30.03300130367279,
+          85.11156439781189
+        ]
+      ],
+      "transfer": [
+        0.0,
+        30.03300130367279
+      ],
+      "transfer_total_avg": 30.03300130367279,
+      "average_per_task": [
+        30.63306212425232,
+        85.11156439781189
+      ],
+      "average_total_avg": 57.872313261032104,
+      "last": [
+        30.03300130367279,
+        85.11156439781189
+      ],
+      "last_total_avg": 57.57228285074234
+    }
+  },
+  "summary_metrics": {
+    "zero_shot": {
+      "transfer_total_avg": 24.452444911003113,
+      "average_total_avg": 53.40575650334358,
+      "last_total_avg": 53.44326049089432
+    },
+    "lr_rgda": {
+      "transfer_total_avg": 33.81338119506836,
+      "average_total_avg": 61.388491094112396,
+      "last_total_avg": 60.780930519104004
+    },
+    "ours_ensemble": {
+      "transfer_total_avg": 30.03300130367279,
+      "average_total_avg": 57.872313261032104,
+      "last_total_avg": 57.57228285074234
+    }
+  },
+  "per_file_results": {
+    "zero_shot": "incremental_20260616_191945_zs.json",
+    "lr_rgda": "incremental_20260616_191945_rgda.json",
+    "ensemble": "incremental_20260616_191945_ens.json"
+  }
+}

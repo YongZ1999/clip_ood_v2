@@ -258,12 +258,20 @@ class LADATrainer(LoRANSPTrainer):
 
             lada_logits = self.lada_classifier(all_feats)
 
+            # 对齐 LADA logits 和 text logits 的类别维度
+            text_c = text_logits.shape[1]
+            lada_c = lada_logits.shape[1]
+            if lada_c != text_c:
+                if lada_c < text_c:
+                    lada_logits = F.pad(lada_logits, (0, text_c - lada_c))
+                else:
+                    lada_logits = lada_logits[:, :text_c]
+
             if self.official_mode:
                 total_logits = text_logits + self.lada_alpha * lada_logits
             else:
                 text_preds = text_logits.argmax(dim=1)
-                lada_classes = lada_logits.shape[1]
-                mask = (text_preds < lada_classes).float().unsqueeze(1)
+                mask = (text_preds < lada_c).float().unsqueeze(1)
                 total_logits = text_logits + mask * self.lada_alpha * lada_logits
 
             loss = weighted_cross_entropy(total_logits, all_labels_for_text, all_weights)

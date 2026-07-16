@@ -1,0 +1,171 @@
+{
+    "mode": "Joint Fine-tuning",
+    "timestamp": "2026-05-25 17:46:12",
+    "arguments": {
+        "id_datasets": [
+            "aircraft",
+            "caltech101",
+            "dtd",
+            "eurosat",
+            "flowers",
+            "food101",
+            "mnist",
+            "oxford_pets",
+            "stanford_cars",
+            "sun397"
+        ],
+        "ood_datasets": [],
+        "root": "/data1/open_datasets/X-TAIL",
+        "num_shots": 16,
+        "batch_size": 32,
+        "max_num_per_test_dataset": 1000,
+        "seed": 42,
+        "gpu": 0,
+        "device": "cuda:0",
+        "iterations": 800,
+        "lr": 0.0001,
+        "weight_decay": 3e-05,
+        "lora_rank": 4,
+        "lora_type": "lora_nsp",
+        "nsp_eps": 0.05,
+        "nsp_weight": 0.02,
+        "weight_temp": 1.0,
+        "weight_kind": "log1p",
+        "weight_p": 1.0,
+        "reference_dataset": "flickr8k",
+        "reference_batch_size": 32,
+        "num_workers": 4,
+        "fd_weight": 1.0,
+        "cd_weight": 1.0,
+        "aux_weight": 0.0,
+        "sce_a": 0.5,
+        "sce_b": 0.5,
+        "tune_student": false,
+        "alpha_sensitivity": false,
+        "adaptive_ensemble": false,
+        "alpha": 0.5,
+        "temperature": 1.0,
+        "rgda_rank": 32,
+        "rgda_alpha1": 0.2,
+        "rgda_alpha2": 2.0,
+        "rgda_alpha3": 0.5,
+        "num_centers": 1
+    },
+    "id_datasets": [
+        "aircraft",
+        "caltech101",
+        "dtd",
+        "eurosat",
+        "flowers",
+        "food101",
+        "mnist",
+        "oxford_pets",
+        "stanford_cars",
+        "sun397"
+    ],
+    "ood_datasets": [],
+    "metrics": {
+        "id": {
+            "per_dataset": {
+                "zero_shot": {
+                    "aircraft": 22.292228043079376,
+                    "caltech101": 73.46855998039246,
+                    "dtd": 37.293145060539246,
+                    "eurosat": 37.395063042640686,
+                    "flowers": 61.956965923309326,
+                    "food101": 82.63696432113647,
+                    "mnist": 43.869999051094055,
+                    "oxford_pets": 84.21912789344788,
+                    "stanford_cars": 60.26613712310791,
+                    "sun397": 60.931986570358276
+                },
+                "lr_rgda": {
+                    "aircraft": 33.90339016914368,
+                    "caltech101": 84.3407690525055,
+                    "dtd": 58.156031370162964,
+                    "eurosat": 77.76542901992798,
+                    "flowers": 92.73244142532349,
+                    "food101": 77.30693221092224,
+                    "mnist": 77.45999693870544,
+                    "oxford_pets": 73.2079565525055,
+                    "stanford_cars": 58.22659134864807,
+                    "sun397": 66.63475632667542
+                },
+                "ours_ensemble": {
+                    "aircraft": 34.56345498561859,
+                    "caltech101": 84.70588326454163,
+                    "dtd": 58.62883925437927,
+                    "eurosat": 76.93827152252197,
+                    "flowers": 89.60617184638977,
+                    "food101": 83.34323167800903,
+                    "mnist": 80.78999519348145,
+                    "oxford_pets": 84.57345366477966,
+                    "stanford_cars": 67.2055721282959,
+                    "sun397": 70.81108093261719
+                }
+            },
+            "average": {
+                "zero_shot": 56.43301770091057,
+                "lr_rgda": 69.97342944145203,
+                "ours_ensemble": 73.11659544706345
+            }
+        },
+        "ood": {
+            "per_dataset": {
+                "zero_shot": {},
+                "lr_rgda": {},
+                "ours_ensemble": {}
+            },
+            "average": {
+                "zero_shot": 0.0,
+                "lr_rgda": 0.0,
+                "ours_ensemble": 0.0
+            }
+        },
+        "total": {
+            "per_dataset": {
+                "zero_shot": {
+                    "aircraft": 22.292228043079376,
+                    "caltech101": 73.46855998039246,
+                    "dtd": 37.293145060539246,
+                    "eurosat": 37.395063042640686,
+                    "flowers": 61.956965923309326,
+                    "food101": 82.63696432113647,
+                    "mnist": 43.869999051094055,
+                    "oxford_pets": 84.21912789344788,
+                    "stanford_cars": 60.26613712310791,
+                    "sun397": 60.931986570358276
+                },
+                "lr_rgda": {
+                    "aircraft": 33.90339016914368,
+                    "caltech101": 84.3407690525055,
+                    "dtd": 58.156031370162964,
+                    "eurosat": 77.76542901992798,
+                    "flowers": 92.73244142532349,
+                    "food101": 77.30693221092224,
+                    "mnist": 77.45999693870544,
+                    "oxford_pets": 73.2079565525055,
+                    "stanford_cars": 58.22659134864807,
+                    "sun397": 66.63475632667542
+                },
+                "ours_ensemble": {
+                    "aircraft": 34.56345498561859,
+                    "caltech101": 84.70588326454163,
+                    "dtd": 58.62883925437927,
+                    "eurosat": 76.93827152252197,
+                    "flowers": 89.60617184638977,
+                    "food101": 83.34323167800903,
+                    "mnist": 80.78999519348145,
+                    "oxford_pets": 84.57345366477966,
+                    "stanford_cars": 67.2055721282959,
+                    "sun397": 70.81108093261719
+                }
+            },
+            "average": {
+                "zero_shot": 56.43301770091057,
+                "lr_rgda": 69.97342944145203,
+                "ours_ensemble": 73.11659544706345
+            }
+        }
+    }
+}

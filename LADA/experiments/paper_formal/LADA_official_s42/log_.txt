@@ -1,0 +1,56 @@
+** Config **
+alpha: 1.0
+backbone: CLIP-ViT-B/16
+batch_size: 64
+beta: 1.0
+continue_train: True
+continue_train_first: False
+dataset: 
+dataset_sequence: ['aircraft', 'caltech101', 'dtd', 'eurosat', 'flowers', 'food101', 'mnist', 'oxford_pets', 'stanford_cars', 'sun397']
+deterministic: True
+gpu: 0
+image_prototypes_weight_coef: 64.0
+lada_k: 16
+loss_type: CE
+lr: 0.001
+model_dir: ./output/../experiments/paper_formal/LADA_official_s42
+num_epochs: 20
+num_shots: 16
+num_workers: 8
+output_dir: ./output/../experiments/paper_formal/LADA_official_s42
+prec: amp
+print_freq: 10
+prototype_k: 4
+resolution: 224
+root: /data1/open_datasets/X-TAIL
+seed: 42
+t_adapter: False
+t_adapter_dim: 16
+t_adaptformer: True
+t_bias_tuning: False
+t_full_tuning: False
+t_ln_tuning: False
+t_lora: False
+t_lora_mlp: False
+t_mask: False
+t_mask_ratio: None
+t_mask_seed: None
+t_partial: None
+t_ssf_attn: False
+t_ssf_ln: False
+t_ssf_mlp: False
+theta: 1.0
+weight_decay: 0.0005
+zero_shot: False
+************
+Setting fixed seed: 42
+mean: (0.48145466, 0.4578275, 0.40821073)
+std: (0.26862954, 0.26130258, 0.27577711)
+Reading split from /data1/open_datasets/X-TAIL/Caltech101/split_zhou_Caltech101.json
+Reading split from /data1/open_datasets/X-TAIL/DTD/split_zhou_DescribableTextures.json
+Reading split from /data1/open_datasets/X-TAIL/EuroSAT/split_zhou_EuroSAT.json
+Reading split from /data1/open_datasets/X-TAIL/Flowers/split_zhou_OxfordFlowers.json
+Reading split from /data1/open_datasets/X-TAIL/Food/split_zhou_Food101.json
+Reading split from /data1/open_datasets/X-TAIL/Pets/split_zhou_OxfordPets.json
+Reading split from /data1/open_datasets/X-TAIL/StanfordCars/split_zhou_StanfordCars.json
+Reading split from /data1/open_datasets/X-TAIL/Sun397/split_zhou_SUN397.json
