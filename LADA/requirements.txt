@@ -7,3 +7,6 @@ ftfy
 regex
 timm
 gdown
+# Required by pandas to read the Flickr30K Hugging Face parquet shards used
+# when LADA_RETRIEVAL_EVAL=1.
+pyarrow

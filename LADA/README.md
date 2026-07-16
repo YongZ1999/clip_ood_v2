@@ -109,6 +109,13 @@ LADA retrieval, enable the in-process evaluator when launching a seed:
 LADA_RETRIEVAL_EVAL=1 bash run_TAIL_16shot_seed.sh 42 0
 ```
 
+The Flickr30K evaluation data uses parquet shards, so install the retrieval
+dependency in the same environment first:
+
+```bash
+python3 -m pip install pyarrow
+```
+
 It writes `output/LADA_official_s42/retrieval.json` with one `lada` row and an
 exact in-process `frozen_clip` row for each task/dataset, plus LADA Retrieval
 Average and Last summaries. The evaluator reuses the project-wide COCO/Flickr

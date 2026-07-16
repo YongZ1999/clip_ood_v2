@@ -9,6 +9,13 @@ SEED=$1; GPU=$2; DIR="LADA_official_s${SEED}"
 RETRIEVAL_OPTS=""
 if [ "${LADA_RETRIEVAL_EVAL:-0}" = "1" ]; then
   RETRIEVAL_OPTS="retrieval_eval True"
+  # Flickr30K is stored as parquet.  Fail before any costly LADA task starts
+  # instead of discovering the missing optional pandas engine after task 1.
+  python3 -c 'import pyarrow' || {
+    echo "ERROR: LADA_RETRIEVAL_EVAL=1 requires pyarrow for Flickr30K parquet files."
+    echo "Install it in the active environment: python3 -m pip install pyarrow"
+    exit 1
+  }
 fi
 
 OPTS="num_shots 16 root /data1/open_datasets/X-TAIL seed $SEED gpu $GPU output_dir $DIR $RETRIEVAL_OPTS"

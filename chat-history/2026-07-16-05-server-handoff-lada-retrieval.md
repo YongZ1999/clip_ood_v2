@@ -65,6 +65,15 @@ test -d /data/home/zengyong1/dataset/flickr30k_hf/data && echo "Flickr30K OK"
 
 使用原 LADA 环境（历史记录中为 `raoxuan`）。该环境需要 PyTorch、torchvision、scikit-learn、yacs、pandas 及 parquet backend；不要在本地 Mac 运行此实验。
 
+Flickr30K 以 parquet shard 存储；运行检索前必须在**实际启动 LADA 的同一 conda 环境**安装 `pyarrow`：
+
+```bash
+python3 -m pip install pyarrow
+python3 -c "import pyarrow; print(pyarrow.__version__)"
+```
+
+`LADA_RETRIEVAL_EVAL=1` 的新 launcher 会在任何训练开始前检查此依赖并快速失败，防止完成 Task 1 后才中断。
+
 ## 4. 正式运行：16-shot、3 个 seed
 
 每个 seed 仍是官方的 10 个独立任务进程，训练预算不变。只需在原命令前增加 `LADA_RETRIEVAL_EVAL=1`。
