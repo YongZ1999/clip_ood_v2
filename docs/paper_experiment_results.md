@@ -1,11 +1,11 @@
 # 论文正式实验结果汇总
 
 **实验时间**: 2026-07-13 ~ 2026-07-16
-**代码版本**: main_v3 (`ea74d94`；协方差分组归一化修复前)
+**代码版本**: main_v3 (`ea74d94`；LoRA 系列正式结果）+ v4（官方 LADA 任务后检索评测）
 **协议**: X-TAIL 10-task Class-Incremental Learning, 16-shot / full-shot
 **指标**: LADA Transfer / Average / Last（百分比），3-seed mean ± std
 
-> **审计状态（2026-07-16）**：本文件保留修复前的可追溯结果，不能再作为修复后 LoRA-NF / LoRA-Null / Gradient-projected LoRA 的最终论文数字。Standard LoRA 与 Frozen CLIP 不受协方差修复影响。正式表格需以修复后、同一冻结协议的重跑结果替换；新运行还会显式记录蒸馏参考集根目录。
+> **审计状态（2026-07-16）**：LoRA 系列结果保留为 `main_v3 (ea74d94)` 原始实现的可追溯正式结果，不应写成由修复后的 v4 代码重新生成。正式 LADA 检索则由 v4 在每个任务训练结束、当前 Text AdaptFormer 仍在内存时直接评测；不再以 Frozen CLIP 代理。
 
 ---
 
@@ -165,12 +165,14 @@ LADA 官方代码（AdaptFormer + DPT + label-specific memory），16-shot, 3 se
 
 > **审计更正（2026-07-16）**：Frozen CLIP 是实际测得的冻结基线，**不是官方 LADA 的检索结果**。官方 LADA 每个任务会训练 AdaptFormer 文本端；I2T 和 T2I 的相似度都同时依赖图像与文本嵌入，因而不能由“视觉端冻结”推出其与 Frozen CLIP 相等。现有 LADA checkpoint 也没有保存逐任务文本适配器，不能离线补算 Retrieval Average/Last。下表只能支持 LoRA 系列相对 Frozen CLIP 的对齐保持结论；若要比较 LADA，必须在官方 LADA 每个任务训练结束时用当时的文本适配器直接评测。
 
-> **结果状态**：以下 LoRA-NF/LoRA 数值来自协方差分组归一化修复前的运行。修复会改变 NSP 的数值尺度并可能改变投影切分，正式论文应在修复版上重跑受影响的 LoRA-NF、LoRA-Null、Gradient-projected LoRA 实验及其消融；Standard LoRA 不受该修复影响。
+> **结果状态**：LoRA 系列数值对应 `main_v3 (ea74d94)` 的原始硬 NSP 实现；本文保留这些历史正式结果，并明确区分于后续 v4 代码。LADA 三个 seed 的检索文件在每个任务结束时直接评测当前 Text AdaptFormer，故其 Average/Last 是真实 LADA 指标。
 
 | Config | Dataset | Avg I2T R@1 | Avg T2I R@1 | Last I2T R@1 | Last T2I R@1 |
 |------|------|:---:|:---:|:---:|:---:|
 | **Frozen CLIP** | MSCOCO 5K | **52.32** | **33.33** | **52.32** | **33.33** |
 | **Frozen CLIP** | Flickr30K | **81.10** | **60.78** | **81.10** | **60.78** |
+| **LADA（官方，16-shot，3 seeds）** | MSCOCO 5K | **51.14 ± 0.20** | **30.17 ± 0.29** | **53.81 ± 0.19** | **24.28 ± 0.92** |
+| **LADA（官方，16-shot，3 seeds）** | Flickr30K | **79.53 ± 0.18** | **58.19 ± 0.49** | **81.43 ± 0.12** | **51.91 ± 1.23** |
 | LoRA 16-shot | MSCOCO 5K | 51.97 | 33.30 | 51.77 | 33.80 |
 | LoRA 16-shot | Flickr30K | 81.14 | 61.12 | 81.17 | 61.56 |
 | LoRA-NF 16-shot | MSCOCO 5K | 52.07 | 33.44 | 52.55 | 33.93 |
@@ -180,7 +182,11 @@ LADA 官方代码（AdaptFormer + DPT + label-specific memory），16-shot, 3 se
 | LoRA-NF full-shot | MSCOCO 5K | 52.33 | 33.62 | 52.47 | 33.93 |
 | LoRA-NF full-shot | Flickr30K | 81.05 | 61.19 | 81.27 | 61.80 |
 
-**关键发现**：LoRA-NF 和 Frozen CLIP 检索差距 < 0.3%，证明 LoRA-NF 在提升分类的同时保持了 CLIP 原有的跨模态对齐能力。
+**关键发现**：
+
+1. LoRA-NF 与 Frozen CLIP 的 R@1 差距总体小于 0.3%，表明其在提升分类的同时基本保持 CLIP 原有的跨模态对齐。
+2. 真实 LADA 不等同于 Frozen CLIP：LADA 的最终 I2T R@1 略高（MSCOCO +1.49、Flickr30K +0.33），但 T2I R@1 明显下降（MSCOCO -9.05、Flickr30K -8.87）。
+3. 在该通用检索协议下，LADA 的 Text AdaptFormer 对最终 I2T 有有限增益，但其检索 Average 和 T2I 保持性弱于 Frozen CLIP；因此不能再以冻结视觉端作为 LADA 检索不变的依据。
 
 ---
 
