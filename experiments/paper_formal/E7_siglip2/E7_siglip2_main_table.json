@@ -1,0 +1,95 @@
+{
+  "schema_version": 1,
+  "summary": {
+    "LoRA-NF Ensemble": {
+      "runs": [
+        {
+          "path": "experiments/paper_formal/E7_siglip2/E7__siglip2__lora_nf__16shot__seed42_ens_results.json",
+          "metrics": {
+            "transfer": 59.9414139838702,
+            "average": 70.90405787341297,
+            "last": 87.93821632862091
+          }
+        },
+        {
+          "path": "experiments/paper_formal/E7_siglip2/E7__siglip2__lora_nf__16shot__seed43_ens_results.json",
+          "metrics": {
+            "transfer": 59.783346751668674,
+            "average": 70.3508511595428,
+            "last": 87.58870899677277
+          }
+        },
+        {
+          "path": "experiments/paper_formal/E7_siglip2/E7__siglip2__lora_nf__16shot__seed44_ens_results.json",
+          "metrics": {
+            "transfer": 59.77099435837574,
+            "average": 69.72755504399538,
+            "last": 87.77766525745392
+          }
+        }
+      ],
+      "metrics": {
+        "transfer": {
+          "mean": 59.831918364638206,
+          "std": 0.07758914605477743,
+          "n": 3
+        },
+        "average": {
+          "mean": 70.32748802565038,
+          "std": 0.48058929376745574,
+          "n": 3
+        },
+        "last": {
+          "mean": 87.7681968609492,
+          "std": 0.14284276122874925,
+          "n": 3
+        }
+      }
+    },
+    "Native LADA+ZS": {
+      "runs": [
+        {
+          "path": "experiments/paper_formal/E7_siglip2/E7__siglip2__lada_native__16shot__seed42_lada_zs_results.json",
+          "metrics": {
+            "transfer": 57.62764215425011,
+            "average": 71.03248011413962,
+            "last": 88.18464040756226
+          }
+        },
+        {
+          "path": "experiments/paper_formal/E7_siglip2/E7__siglip2__lada_native__16shot__seed43_lada_zs_results.json",
+          "metrics": {
+            "transfer": 58.36364510406722,
+            "average": 70.88411823892966,
+            "last": 88.03672850131989
+          }
+        },
+        {
+          "path": "experiments/paper_formal/E7_siglip2/E7__siglip2__lada_native__16shot__seed44_lada_zs_results.json",
+          "metrics": {
+            "transfer": 58.103793016072316,
+            "average": 71.193541023531,
+            "last": 88.23354065418243
+          }
+        }
+      ],
+      "metrics": {
+        "transfer": {
+          "mean": 58.03169342479655,
+          "std": 0.3047664120070429,
+          "n": 3
+        },
+        "average": {
+          "mean": 71.03671312553342,
+          "std": 0.12635677978567042,
+          "n": 3
+        },
+        "last": {
+          "mean": 88.15163652102153,
+          "std": 0.08366878459613994,
+          "n": 3
+        }
+      }
+    }
+  }
+}
