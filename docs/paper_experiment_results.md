@@ -3,7 +3,7 @@
 **实验时间**: 2026-07-13 ~ 2026-07-16
 **代码版本**: main_v3 (`ea74d94`；LoRA 系列正式结果）+ v4（官方 LADA 任务后检索评测）
 **协议**: X-TAIL 10-task Class-Incremental Learning, 16-shot / full-shot
-**指标**: LADA Transfer / Average / Last（百分比），3-seed mean ± std
+**指标**: LADA Transfer / Average / Last（百分比）；3-seed mean ± population std（与 `scripts/summarize_continual_metrics.py` 一致）
 
 ---
 
@@ -24,19 +24,21 @@
 
 ## 1. E1: LADA-style 主实验
 
-X-TAIL 10-task class-incremental 协议。以下为 Ensemble 分类器下的 3-seed mean 结果。K×K 矩阵的行表示训练任务，列表示测试数据集；Transfer 为上一行对应列的 Accuracy（衡量后向迁移），Average 为列均值，Last 为末行（最终模型在所有数据集上的性能）。
+X-TAIL 10-task class-incremental 协议。主表同时报告零样本分类器（ZS，训练端的直接效果）与 Ensemble（ZS + LR-RGDA，完整方法的推理效果）的 3-seed mean。K×K 矩阵的行表示训练任务，列表示测试数据集；Transfer 为训练当前任务之前在该任务上的平均准确率，Average 为全部任务阶段的列均值，Last 为末行（最终模型在所有数据集上的性能）。
+
+LR-RGDA 只在已经见过的类别上构建判别分类器，因此未见任务位置为零；其 Transfer 与 Average 不具有和 ZS/Ensemble 相同的含义。为避免把“未构建分类器”误读为分类失败，主表不单列 RGDA 的 Transfer/Average，只在单 seed 明细中提供其有效的最终 Last，供分析 Ensemble 的增益。
 
 ### 1.1 16-shot
 
 **汇总**
 
-| Method | Ens Transfer | Ens Average | Ens Last |
-|------|:---:|:---:|:---:|
-| Standard LoRA | 59.84 ± 0.09 | 70.95 ± 0.01 | 82.12 ± 0.13 |
-| **LoRA-NF** | **60.14 ± 0.16** | **71.75 ± 0.08** | **83.74 ± 0.03** |
-| Δ | +0.30 | +0.80 | +1.62 |
+| Method | ZS Transfer | ZS Average | ZS Last | Ens Transfer | Ens Average | Ens Last |
+|------|:---:|:---:|:---:|:---:|:---:|:---:|
+| Standard LoRA | 59.51 ± 0.22 | 69.18 ± 0.16 | 78.58 ± 0.24 | 59.84 ± 0.09 | 70.95 ± 0.01 | 82.12 ± 0.13 |
+| **LoRA-NF** | **59.84 ± 0.23** | **70.02 ± 0.14** | **80.14 ± 0.02** | **60.14 ± 0.16** | **71.75 ± 0.08** | **83.74 ± 0.03** |
+| Δ (LoRA-NF − LoRA) | +0.33 | +0.84 | +1.56 | +0.30 | +0.80 | +1.62 |
 
-**Standard LoRA 16-shot — Ensemble Accuracy Matrix**
+**Standard LoRA 16-shot — Ensemble Accuracy Matrix（3-seed mean）**
 
 | Dataset | aircraft | caltech101 | dtd | eurosat | flowers | food101 | mnist | oxford_pets | stanford_cars | sun397 |
 |------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
@@ -50,13 +52,13 @@ X-TAIL 10-task class-incremental 协议。以下为 Ensemble 分类器下的 3-s
 | oxford_pets | 51.0 | 89.1 | 67.3 | 73.0 | 97.7 | 84.7 | 94.2 | 90.9 | 58.0 | 61.0 |
 | stanford_cars | 50.4 | 89.7 | 67.1 | 72.5 | 97.8 | 84.8 | 93.7 | 90.9 | 85.2 | 61.2 |
 | sun397 | 49.6 | 91.0 | 69.5 | 83.0 | 97.6 | 85.1 | 94.0 | 91.0 | 84.4 | 76.1 |
-| Transfer | N/A | 74.7 | 36.3 | 35.1 | 61.7 | 81.8 | 48.0 | 84.7 | 58.0 | 61.2 |
+| Transfer | N/A | 74.7 | 36.9 | 35.4 | 62.5 | 82.0 | 44.6 | 84.7 | 56.7 | 61.0 |
 | Average | 51.2 | 88.1 | 61.0 | 66.2 | 83.8 | 83.5 | 64.4 | 86.6 | 62.3 | 62.5 |
 | Last | 49.6 | 91.0 | 69.5 | 83.0 | 97.6 | 85.1 | 94.0 | 91.0 | 84.4 | 76.1 |
 
-> Transfer Mean: 61.7 · Average Mean: 71.0 · **Last Mean: 82.1**
+> Transfer Mean: 59.8 · Average Mean: 71.0 · **Last Mean: 82.1**
 
-**LoRA-NF 16-shot — Ensemble Accuracy Matrix**
+**LoRA-NF 16-shot — Ensemble Accuracy Matrix（3-seed mean）**
 
 | Dataset | aircraft | caltech101 | dtd | eurosat | flowers | food101 | mnist | oxford_pets | stanford_cars | sun397 |
 |------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
@@ -70,23 +72,23 @@ X-TAIL 10-task class-incremental 协议。以下为 Ensemble 分类器下的 3-s
 | oxford_pets | 52.3 | 89.2 | 68.2 | 85.7 | 97.8 | 84.8 | 94.3 | 90.6 | 56.8 | 61.7 |
 | stanford_cars | 52.4 | 90.0 | 68.4 | 86.0 | 97.7 | 84.9 | 94.2 | 90.9 | 85.0 | 61.7 |
 | sun397 | 52.6 | 91.7 | 71.0 | 92.4 | 98.0 | 85.5 | 94.7 | 90.8 | 84.8 | 75.9 |
-| Transfer | N/A | 74.5 | 36.5 | 38.9 | 63.7 | 82.5 | 46.0 | 84.7 | 56.8 | 61.7 |
+| Transfer | N/A | 74.5 | 36.9 | 37.1 | 63.6 | 82.5 | 44.4 | 84.6 | 56.2 | 61.4 |
 | Average | 52.4 | 87.9 | 61.5 | 72.2 | 84.1 | 83.7 | 64.4 | 86.4 | 61.9 | 62.9 |
 | Last | 52.6 | 91.7 | 71.0 | 92.4 | 98.0 | 85.5 | 94.7 | 90.8 | 84.8 | 75.9 |
 
-> Transfer Mean: 61.9 · Average Mean: 71.8 · **Last Mean: 83.7**
+> Transfer Mean: 60.1 · Average Mean: 71.8 · **Last Mean: 83.7**
 
 ### 1.2 Full-shot
 
 **汇总**
 
-| Method | Ens Transfer | Ens Average | Ens Last |
-|------|:---:|:---:|:---:|
-| Standard LoRA | 60.40 ± 0.08 | 73.59 ± 0.13 | 85.02 ± 0.14 |
-| **LoRA-NF** | **60.69 ± 0.16** | **74.12 ± 0.16** | **86.09 ± 0.07** |
-| Δ | +0.29 | +0.53 | +1.07 |
+| Method | ZS Transfer | ZS Average | ZS Last | Ens Transfer | Ens Average | Ens Last |
+|------|:---:|:---:|:---:|:---:|:---:|:---:|
+| Standard LoRA | 60.07 ± 0.06 | 71.90 ± 0.14 | 82.28 ± 0.09 | 60.40 ± 0.06 | 73.59 ± 0.11 | 85.02 ± 0.12 |
+| **LoRA-NF** | **60.26 ± 0.13** | **72.22 ± 0.13** | **82.79 ± 0.03** | **60.69 ± 0.13** | **74.12 ± 0.13** | **86.09 ± 0.06** |
+| Δ (LoRA-NF − LoRA) | +0.19 | +0.32 | +0.51 | +0.29 | +0.53 | +1.07 |
 
-**Standard LoRA Full-shot — Ensemble Accuracy Matrix**
+**Standard LoRA Full-shot — Ensemble Accuracy Matrix（3-seed mean）**
 
 | Dataset | aircraft | caltech101 | dtd | eurosat | flowers | food101 | mnist | oxford_pets | stanford_cars | sun397 |
 |------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
@@ -100,13 +102,13 @@ X-TAIL 10-task class-incremental 协议。以下为 Ensemble 分类器下的 3-s
 | oxford_pets | 53.2 | 90.5 | 72.6 | 92.6 | 98.5 | 86.9 | 98.6 | 92.5 | 57.8 | 61.0 |
 | stanford_cars | 53.0 | 91.2 | 72.8 | 91.9 | 98.4 | 86.9 | 98.5 | 92.5 | 87.0 | 61.2 |
 | sun397 | 52.6 | 91.8 | 73.9 | 92.3 | 98.3 | 86.9 | 98.6 | 92.4 | 86.2 | 77.2 |
-| Transfer | N/A | 74.7 | 36.7 | 34.3 | 60.8 | 81.7 | 54.0 | 85.0 | 57.8 | 61.2 |
+| Transfer | N/A | 74.7 | 37.1 | 35.4 | 61.9 | 81.9 | 49.4 | 84.9 | 57.3 | 61.0 |
 | Average | 53.5 | 89.4 | 66.1 | 76.6 | 83.9 | 84.5 | 69.1 | 87.2 | 63.2 | 62.6 |
 | Last | 52.6 | 91.8 | 73.9 | 92.3 | 98.3 | 86.9 | 98.6 | 92.4 | 86.2 | 77.2 |
 
-> Transfer Mean: 62.5 · Average Mean: 73.6 · **Last Mean: 85.0**
+> Transfer Mean: 60.4 · Average Mean: 73.6 · **Last Mean: 85.0**
 
-**LoRA-NF Full-shot — Ensemble Accuracy Matrix**
+**LoRA-NF Full-shot — Ensemble Accuracy Matrix（3-seed mean）**
 
 | Dataset | aircraft | caltech101 | dtd | eurosat | flowers | food101 | mnist | oxford_pets | stanford_cars | sun397 |
 |------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
@@ -120,28 +122,30 @@ X-TAIL 10-task class-incremental 协议。以下为 Ensemble 分类器下的 3-s
 | oxford_pets | 55.0 | 91.0 | 74.5 | 96.2 | 98.5 | 87.0 | 98.5 | 93.0 | 57.4 | 61.5 |
 | stanford_cars | 55.0 | 91.8 | 74.2 | 96.2 | 98.5 | 87.0 | 98.5 | 92.8 | 86.5 | 61.7 |
 | sun397 | 54.7 | 92.7 | 75.8 | 96.7 | 98.5 | 87.3 | 98.6 | 92.7 | 86.7 | 77.1 |
-| Transfer | N/A | 74.6 | 36.7 | 36.4 | 62.7 | 82.1 | 52.3 | 84.6 | 57.4 | 61.7 |
+| Transfer | N/A | 74.6 | 37.1 | 36.3 | 63.0 | 82.3 | 49.8 | 84.6 | 57.3 | 61.4 |
 | Average | 55.1 | 89.6 | 66.9 | 78.3 | 84.3 | 84.7 | 69.3 | 87.0 | 63.1 | 63.0 |
 | Last | 54.7 | 92.7 | 75.8 | 96.7 | 98.5 | 87.3 | 98.6 | 92.7 | 86.7 | 77.1 |
 
-> Transfer Mean: 62.7 · Average Mean: 74.1 · **Last Mean: 86.1**
+> Transfer Mean: 60.7 · Average Mean: 74.1 · **Last Mean: 86.1**
 
 ### 单 seed 明细
 
-| Config | Seed | Ens Trans | Ens Avg | Ens Last |
-|------|:---:|:---:|:---:|:---:|
-| LoRA 16-shot | 42 | 59.73 | 70.95 | 81.94 |
-| LoRA 16-shot | 43 | 59.86 | 70.94 | 82.19 |
-| LoRA 16-shot | 44 | 59.94 | 70.97 | 82.23 |
-| LoRA-NF 16-shot | 42 | 60.00 | 71.65 | 83.70 |
-| LoRA-NF 16-shot | 43 | 60.05 | 71.84 | 83.74 |
-| LoRA-NF 16-shot | 44 | 60.37 | 71.77 | 83.78 |
-| LoRA full-shot | 42 | 60.30 | 73.44 | 84.85 |
-| LoRA full-shot | 43 | 60.44 | 73.64 | 85.12 |
-| LoRA full-shot | 44 | 60.46 | 73.69 | 85.07 |
-| LoRA-NF full-shot | 42 | 60.49 | 73.95 | 86.04 |
-| LoRA-NF full-shot | 43 | 60.79 | 74.24 | 86.06 |
-| LoRA-NF full-shot | 44 | 60.78 | 74.16 | 86.17 |
+| Config | Seed | ZS Trans | ZS Avg | ZS Last | RGDA Last | Ens Trans | Ens Avg | Ens Last |
+|------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| LoRA 16-shot | 42 | 59.22 | 69.07 | 78.55 | 80.27 | 59.73 | 70.95 | 81.94 |
+| LoRA 16-shot | 43 | 59.55 | 69.06 | 78.30 | 80.66 | 59.86 | 70.94 | 82.19 |
+| LoRA 16-shot | 44 | 59.75 | 69.40 | 78.88 | 80.84 | 59.94 | 70.97 | 82.23 |
+| LoRA-NF 16-shot | 42 | 59.60 | 69.85 | 80.13 | 82.16 | 60.00 | 71.65 | 83.70 |
+| LoRA-NF 16-shot | 43 | 59.76 | 70.03 | 80.11 | 82.39 | 60.05 | 71.84 | 83.74 |
+| LoRA-NF 16-shot | 44 | 60.16 | 70.18 | 80.16 | 82.32 | 60.37 | 71.77 | 83.78 |
+| LoRA full-shot | 42 | 59.98 | 71.74 | 82.15 | 83.32 | 60.33 | 73.44 | 84.85 |
+| LoRA full-shot | 43 | 60.10 | 71.88 | 82.36 | 83.79 | 60.48 | 73.64 | 85.12 |
+| LoRA full-shot | 44 | 60.13 | 72.07 | 82.33 | 83.47 | 60.40 | 73.69 | 85.07 |
+| LoRA-NF full-shot | 42 | 60.07 | 72.05 | 82.84 | 84.78 | 60.54 | 73.95 | 86.04 |
+| LoRA-NF full-shot | 43 | 60.37 | 72.26 | 82.75 | 85.00 | 60.85 | 74.26 | 86.17 |
+| LoRA-NF full-shot | 44 | 60.33 | 72.35 | 82.79 | 84.78 | 60.69 | 74.16 | 86.05 |
+
+为保持正文可读性，上述四张 K×K 大矩阵只展示完整 Ensemble；对应的 ZS 和 RGDA K×K 矩阵与全部 per-task 指标已逐 seed 保存于 `experiments/paper_formal/E1_main/E1__{lora|lora_nf}__{16shot__seed42/43/44|fs__s42/43/44}_{zs|rgda|ens}_results.json`。论文附录若需要逐任务分析，应从这些原始 JSON 聚合 ZS/Ens 矩阵，而不是把 RGDA 的未见任务零值当作有效前向分类结果。
 
 ---
 
@@ -279,6 +283,8 @@ Ens Last 排序: **LoRA-NF (83.74) > GradProj (82.97) > LoRA-Null (82.32) > LoRA
 
 LADA 官方代码（AdaptFormer + DPT + label-specific memory），16-shot, 3 seeds。
 
+此表报告 LADA 原生 label-specific classifier 的输出；它既不是本文 CLIP 的纯 ZS classifier，也不是 LR-RGDA Ensemble。因此它保留 LADA 论文的 Transfer/Average/Last 口径，但不应把列名误写为 `Ens` 或 `ZS`。
+
 | Seed | Transfer | Average | Last |
 |:---:|:---:|:---:|:---:|
 | 42 | 61.6 | 72.5 | 82.9 |
@@ -331,8 +337,8 @@ LADA 官方代码（AdaptFormer + DPT + label-specific memory），16-shot, 3 se
 
 | Method | ZS Average | ZS Last | Ens Average | Ens Last |
 |------|:---:|:---:|:---:|:---:|
-| Standard LoRA | 71.90 ± 0.17 | 82.28 ± 0.12 | 73.59 ± 0.13 | 85.02 ± 0.14 |
-| **LoRA-NF** | **72.22 ± 0.15** | **82.79 ± 0.04** | **74.12 ± 0.16** | **86.09 ± 0.07** |
+| Standard LoRA | 71.90 ± 0.14 | 82.28 ± 0.09 | 73.59 ± 0.11 | 85.02 ± 0.12 |
+| **LoRA-NF** | **72.22 ± 0.13** | **82.79 ± 0.03** | **74.12 ± 0.13** | **86.09 ± 0.06** |
 
 ---
 
@@ -342,12 +348,12 @@ Backbone: `google/siglip2-base-patch16-224`, X-TAIL 16-shot, 3 seeds.
 
 ### 汇总
 
-| Method | Transfer | Average | Last |
+| Method (evaluation head) | Transfer | Average | Last |
 |---|---:|---:|---:|
-| LoRA-NF Ensemble | 59.83 ± 0.08 | 70.33 ± 0.48 | 87.77 ± 0.14 |
-| Native LADA+ZS | 58.03 ± 0.30 | 71.04 ± 0.13 | 88.15 ± 0.08 |
+| LoRA-NF (Ensemble) | 59.83 ± 0.08 | 70.33 ± 0.48 | 87.77 ± 0.14 |
+| Native LADA (label-specific ZS) | 58.03 ± 0.30 | 71.04 ± 0.13 | 88.15 ± 0.08 |
 
-> LoRA-NF 使用统一 800 iterations/task（同 E1 协议）。Native LADA 使用官方 LADA 原生 epoch 配置（aircraft=40, eurosat=100, mnist=200 等），但架构为冻结 SigLIP2 视觉端 + text AdaptFormer + label-specific prototype memory，非原版 OpenAI-CLIP LADA。
+> LoRA-NF 使用统一 800 iterations/task（同 E1 协议）。Native LADA 使用官方 LADA 原生 epoch 配置（aircraft=40, eurosat=100, mnist=200 等），但架构为冻结 SigLIP2 视觉端 + text AdaptFormer + label-specific prototype memory，非原版 OpenAI-CLIP LADA。当前 E7 归档仅包含 LoRA-NF 的 Ensemble 输出，不包含其 ZS 输出；故该表是端到端方法输出的比较，而非严格 head-matched 的 ZS 对比。
 
 该实验检验两种方法迁移到同一 SigLIP2 backbone 后的有效性，而非相同训练预算下的严格效率比较：LoRA-NF 的 Transfer 更高（+1.80），Native LADA 的 Average/Last 更高（+0.71/+0.38）。因此，E7 支持 LoRA-NF 的跨 backbone 可运行性与竞争力，但不应据此主张它在 SigLIP2 上全面优于 Native LADA。
 
@@ -395,7 +401,7 @@ Backbone: `google/siglip2-base-patch16-224`, X-TAIL 16-shot, 3 seeds.
 
 ## 10. 核心结论
 
-1. **分类主结果**：在 OpenAI-CLIP 的 X-TAIL 16-shot 主表中，LoRA-NF 的 Ensemble Last 为 83.74 ± 0.03，高于 Standard LoRA 的 82.12 ± 0.13；full-shot 时达到 86.09 ± 0.07。
+1. **分类主结果**：在 OpenAI-CLIP 的 X-TAIL 16-shot 主表中，LoRA-NF 的 Ensemble Last 为 83.74 ± 0.03，高于 Standard LoRA 的 82.12 ± 0.13；full-shot 时达到 86.09 ± 0.06。
 2. **相对 LADA 的主表表现**：同一 16-shot 主表口径下，LoRA-NF Ensemble Last 为 83.74，LADA 官方复现为 83.0；这支持本文在该 CLIP 协议下的分类结果。二者分类器与训练协议不同，结论限于该既定主表比较。
 3. **NSP 的分类贡献**：在相同 FD/CD 设置下，LoRA-NF 的 Ens Last 高于 Gradient-projected LoRA、LoRA-Null 和 Standard LoRA（83.74 > 82.97 > 82.32 > 82.12）。
 4. **蒸馏的分类贡献**：E2 显示 CD 是主要正向因素；仅 CD（C2）相对无蒸馏（C0）将 ZS Last 提升 0.79 点、Ens Last 提升 0.51 点。仅 FD 的收益较小。
