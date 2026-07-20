@@ -87,7 +87,9 @@ bash scripts/run_transfer_aware_main_table.sh
 The launcher uses GPU IDs `0,1,2,3,4,5` by default. It starts six jobs in the
 first wave and queues one matched job per GPU for the second wave. It logs all
 commands under `logs/paper_transfer_aware/` and writes JSON/retrieval results
-under `experiments/paper_transfer_aware/E1_main/`.
+under `experiments/paper_transfer_aware/E1_main/`. It explicitly selects
+`openai/clip-vit-base-patch16`, sets `CLIP_USE_SAFETENSORS=0`, and sets
+`CLIP_LOCAL_FILES_ONLY=1`, matching the server's cached OpenAI CLIP weights.
 
 Use `DRY_RUN=1` to inspect the six-GPU schedule and fully expanded commands
 without starting training.

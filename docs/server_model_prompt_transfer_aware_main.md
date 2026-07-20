@@ -21,6 +21,10 @@ nvidia-smi
 python tests/test_transfer_aware_ensemble.py
 ```
 
+该分支的 launcher 已固定 `openai/clip-vit-base-patch16`，并导出
+`CLIP_USE_SAFETENSORS=0`、`CLIP_LOCAL_FILES_ONLY=1`，以使用服务器已有的
+OpenAI CLIP `pytorch_model.bin` 缓存。不要手动改成 safetensors。
+
 如果 `git status --short` 显示任何**已跟踪代码文件**被修改，停止运行并报告这些文件；不要使用 `git reset --hard`。`experiments/`、`logs/` 下的未跟踪结果无需删除。
 
 通过单测后，直接启动官方 launcher：

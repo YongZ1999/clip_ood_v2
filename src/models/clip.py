@@ -28,7 +28,12 @@ def _env_flag(name, default):
 def get_clip_model(args, train_mode="lora"):
     model_name = getattr(args, "model_name", None) or os.environ.get(
         "CLIP_MODEL_NAME", "openai/clip-vit-base-patch16")
-    use_safetensors = _env_flag("CLIP_USE_SAFETENSORS", True)
+    # The project's cached OpenAI CLIP checkpoint is stored as the legacy
+    # PyTorch weights, whereas the supported SigLIP2 checkpoint is safetensors
+    # based.  Keep the environment variable as an explicit override, but make
+    # the no-env default compatible with the actual checkpoint family.
+    use_safetensors = _env_flag(
+        "CLIP_USE_SAFETENSORS", is_siglip2_model_name(model_name))
     local_files_only = _env_flag("CLIP_LOCAL_FILES_ONLY", False)
     model_cls = AutoModel if is_siglip2_model_name(model_name) else CLIPModel
     processor_cls = AutoProcessor if is_siglip2_model_name(model_name) else CLIPProcessor

@@ -15,6 +15,13 @@ RUN_STANDARD_LORA="${RUN_STANDARD_LORA:-1}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 RETRIEVAL_DATASETS="${RETRIEVAL_DATASETS:-mscoco_2014_5k}"
 DRY_RUN="${DRY_RUN:-0}"
+MODEL_NAME="${MODEL_NAME:-openai/clip-vit-base-patch16}"
+
+# The server's OpenAI CLIP cache provides pytorch_model.bin rather than
+# model.safetensors.  These exports retain the known-good offline loading
+# behavior, while src/models/clip.py also has a model-family-aware default.
+export CLIP_USE_SAFETENSORS="${CLIP_USE_SAFETENSORS:-0}"
+export CLIP_LOCAL_FILES_ONLY="${CLIP_LOCAL_FILES_ONLY:-1}"
 
 IFS=',' read -r -a GPUS <<< "${GPU_IDS}"
 if [[ ${#GPUS[@]} -eq 0 || -z "${GPUS[0]}" ]]; then
@@ -56,6 +63,7 @@ run_one() {
   cmd=(
     "${PYTHON_BIN}" -u main_incremental.py
     --root "${ROOT}"
+    --model_name "${MODEL_NAME}"
     --dataset_sequence "${TASKS[@]}"
     --batch_size 32
     --eval_batch_size 128
@@ -178,6 +186,7 @@ worker() {
   echo "branch: $(git branch --show-current 2>/dev/null || true)"
   echo "commit: $(git rev-parse HEAD 2>/dev/null || true)"
   echo "GPUs: ${GPU_IDS}; jobs: ${#JOBS[@]}; RUN_STANDARD_LORA=${RUN_STANDARD_LORA}; DRY_RUN=${DRY_RUN}"
+  echo "model: ${MODEL_NAME}; CLIP_USE_SAFETENSORS=${CLIP_USE_SAFETENSORS}; CLIP_LOCAL_FILES_ONLY=${CLIP_LOCAL_FILES_ONLY}"
   echo "Protocol: preserve_aspect + zs_predicted_seen; classifier settings remain mc4ft200."
 } | tee "${LOG_ROOT}/launcher.log"
 
