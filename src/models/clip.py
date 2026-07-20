@@ -32,7 +32,7 @@ def _can_use_openai_pt_fallback(model_name: str) -> bool:
     return normalized in {"openai/clip-vit-base-patch16", "clip-vit-base-patch16"}
 
 
-def _load_openai_pt_fallback(model_name: str, original_error: OSError):
+def _load_openai_pt_fallback(model_name: str, original_error: Exception):
     """Convert the local OpenAI checkpoint without changing the LoRA API."""
     fallback_enabled = _env_flag("CLIP_OPENAI_PT_FALLBACK", True)
     if not (fallback_enabled and _can_use_openai_pt_fallback(model_name)):
@@ -75,7 +75,7 @@ def get_clip_model(args, train_mode="lora"):
             local_files_only=local_files_only,
             attn_implementation="sdpa",
         )
-    except OSError as exc:
+    except (OSError, AttributeError) as exc:
         # ``clip.load`` itself is not compatible with this project's LoRA
         # wrappers (OpenAI CLIP fuses QKV).  Convert the local OpenAI ``.pt``
         # weights to the existing HF module layout instead, but only for the
@@ -88,7 +88,7 @@ def get_clip_model(args, train_mode="lora"):
                 local_files_only=local_files_only,
                 use_fast=True,
             )
-        except OSError as exc:
+        except (OSError, AttributeError) as exc:
             # A complete model cache paired with an evicted tokenizer cache is
             # still usable: retain the HF model and obtain the exact OpenAI
             # BPE tokenizer from the vendored project files.
