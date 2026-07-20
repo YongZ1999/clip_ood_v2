@@ -121,12 +121,29 @@ class LRRGDAClassifier:
 
 class EnsembleClassifier:
     def __init__(self, zeroshot_classifier, lr_rgda_classifier, alpha=0.5, num_id_classes=None,
-                 adaptive=False):
+                 adaptive=False, routing="classwise"):
+        if routing not in {"classwise", "zs_predicted_seen"}:
+            raise ValueError(
+                "routing must be 'classwise' or 'zs_predicted_seen', "
+                f"got {routing!r}."
+            )
+        if routing == "zs_predicted_seen" and num_id_classes is None:
+            raise ValueError(
+                "zs_predicted_seen routing requires num_id_classes so seen "
+                "and unseen zero-shot classes can be distinguished."
+            )
         self.zeroshot_classifier = zeroshot_classifier
         self.lr_rgda_classifier = lr_rgda_classifier
         self.alpha = alpha
         self.num_id_classes = num_id_classes
         self.adaptive = adaptive
+        self.routing = routing
+
+    def _route_logits(self, raw_zs_logits, zs_scores, ensemble_logits):
+        if self.routing == "classwise":
+            return ensemble_logits
+        zs_predicted_seen = raw_zs_logits.argmax(dim=1) < self.num_id_classes
+        return torch.where(zs_predicted_seen.unsqueeze(1), ensemble_logits, zs_scores)
 
     def _get_ensemble_logits(self, features, logit_scale_zeroshot):
         """计算融合后的 Logits"""
@@ -145,8 +162,8 @@ class EnsembleClassifier:
                 return (1 - alpha_sample) * zs_logits + alpha_sample * rgda_logits
             else:
                 ensemble_logits = (1 - alpha_sample) * zs_logits
-                ensemble_logits[:, :self.num_id_classes] += alpha_sample.squeeze(-1) * rgda_logits
-                return ensemble_logits
+                ensemble_logits[:, :self.num_id_classes] += alpha_sample * rgda_logits
+                return self._route_logits(zs_logits, zs_logits, ensemble_logits)
         else:
             # 固定 α
             zs_logits = zs_logits - zs_logits.max(dim=-1, keepdim=True).values
@@ -157,7 +174,7 @@ class EnsembleClassifier:
             else:
                 ensemble_logits = zs_logits * (1 - self.alpha)
                 ensemble_logits[:, :self.num_id_classes] += self.alpha * rgda_logits
-                return ensemble_logits
+                return self._route_logits(zs_logits, zs_logits, ensemble_logits)
 
     def predict_proba(self, features, logit_scale_zeroshot):
         """如确实需要概率（比如算置信度）"""

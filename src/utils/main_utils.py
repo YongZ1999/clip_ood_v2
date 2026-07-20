@@ -72,12 +72,47 @@ def _normalize_for_ensemble(logits, mode):
     )
 
 
-def combine_ensemble_logits(zs_logits, id_logits, current_num_classes, alpha, mode="zscore"):
-    """Fuse global zero-shot logits with an ID-only classifier."""
+def combine_ensemble_logits(
+    zs_logits,
+    id_logits,
+    current_num_classes,
+    alpha,
+    mode="zscore",
+    routing="classwise",
+):
+    """Fuse global zero-shot logits with an ID-only classifier.
+
+    ``classwise`` is the historical behavior: every sample receives the
+    ID-class correction in the first ``current_num_classes`` columns.
+    ``zs_predicted_seen`` is a transfer-aware gate: a sample whose *zero-shot*
+    argmax is an unseen class keeps its zero-shot scores unchanged, while a
+    sample whose zero-shot argmax is seen uses the same classwise fusion.
+    This decision never uses the ground-truth label.
+    """
+    if not 0 <= int(current_num_classes) <= zs_logits.shape[1]:
+        raise ValueError(
+            "current_num_classes must be within the global zero-shot class range: "
+            f"got {current_num_classes} for {zs_logits.shape[1]} classes."
+        )
+    if routing not in {"classwise", "zs_predicted_seen"}:
+        raise ValueError(
+            f"Unsupported ensemble routing={routing!r}. "
+            "Expected 'classwise' or 'zs_predicted_seen'."
+        )
+
     zs_scores = _normalize_for_ensemble(zs_logits, mode)
     id_scores = _normalize_for_ensemble(id_logits, mode)
     ensemble_logits = zs_scores * (1.0 - alpha)
     ensemble_logits[:, :current_num_classes] += alpha * id_scores
+
+    if routing == "zs_predicted_seen":
+        # Preserve the exact zero-shot decision for samples that ZS itself
+        # assigns to a future/unseen class.  ``zs_scores`` has the same argmax
+        # as raw ZS logits for every supported normalization mode.
+        zs_predicted_seen = zs_logits.argmax(dim=1) < current_num_classes
+        ensemble_logits = torch.where(
+            zs_predicted_seen.unsqueeze(1), ensemble_logits, zs_scores
+        )
     return ensemble_logits
 
 
@@ -116,7 +151,11 @@ def evaluate_dataset(args, d_name, model, zeroshot_classifier, lr_rgda_classifie
 
     if te_loader is None:
         batch_size = eval_batch_size if eval_batch_size is not None else args.batch_size
-        _, test_transform = get_transforms(d_name)
+        _, test_transform = get_transforms(
+            d_name,
+            model_name=getattr(args, "model_name", None),
+            test_resize_mode=getattr(args, "eval_resize_mode", "legacy_square"),
+        )
         _, _, te_loader, c_names = get_xtail_trainloader(
             root=args.root, dataset_name=d_name,
             transform_train=None, transform_test=test_transform,
@@ -149,6 +188,7 @@ def evaluate_dataset(args, d_name, model, zeroshot_classifier, lr_rgda_classifie
 
         # 3. Ensemble 预测（固定 α 或自适应）
         use_adaptive = getattr(args, 'adaptive_ensemble', False)
+        ensemble_routing = getattr(args, "ensemble_routing", "classwise")
         if use_adaptive:
             zs_scores = _normalize_for_ensemble(zs_logits, ensemble_mode)
             rgda_scores = _normalize_for_ensemble(rgda_logits, ensemble_mode)
@@ -157,11 +197,14 @@ def evaluate_dataset(args, d_name, model, zeroshot_classifier, lr_rgda_classifie
             zs_conf = zs_probs.max(dim=-1).values        # [B]
             rgda_conf = rgda_probs.max(dim=-1).values    # [B]
             alpha_sample = torch.sigmoid(rgda_conf - zs_conf).unsqueeze(-1)  # [B, 1]
-            ensemble_logits = (1 - alpha_sample) * zs_scores
-            ensemble_logits[:, :current_num_classes] += alpha_sample * rgda_scores
+            ensemble_logits = combine_ensemble_logits(
+                zs_logits, rgda_logits, current_num_classes, alpha_sample,
+                ensemble_mode, ensemble_routing,
+            )
         else:
             ensemble_logits = combine_ensemble_logits(
-                zs_logits, rgda_logits, current_num_classes, args.alpha, ensemble_mode
+                zs_logits, rgda_logits, current_num_classes, args.alpha,
+                ensemble_mode, ensemble_routing,
             )
         ens_preds = ensemble_logits.argmax(dim=1)
         ens_acc = ens_preds.eq(labels).float().mean().item() * 100
@@ -185,7 +228,8 @@ def evaluate_dataset(args, d_name, model, zeroshot_classifier, lr_rgda_classifie
             lr_sensitivity = []
             for alpha in torch.linspace(0, 1.0, n_alpha_samples):
                 ens_logits = combine_ensemble_logits(
-                    zs_logits, rgda_logits, current_num_classes, alpha, ensemble_mode
+                    zs_logits, rgda_logits, current_num_classes, alpha,
+                    ensemble_mode, ensemble_routing,
                 )
                 ens_preds = ens_logits.argmax(dim=1)
                 ens_acc_alpha = ens_preds.eq(labels).float().mean().item() * 100
@@ -246,6 +290,7 @@ def batch_evaluate_datasets(
     """
     # 解析参数（兼容 args 对象和独立传参）
     use_adaptive = False
+    ensemble_routing = "classwise"
     if args is not None:
         root = args.root
         num_shots = args.num_shots
@@ -254,6 +299,7 @@ def batch_evaluate_datasets(
         alpha = args.alpha
         lada_alpha = getattr(args, 'lada_alpha', lada_alpha)
         use_adaptive = getattr(args, 'adaptive_ensemble', False)
+        ensemble_routing = getattr(args, "ensemble_routing", ensemble_routing)
 
     from src.utils.data import get_xtail_trainloader, get_transforms
     from src.utils.feature_extractor import extract_features
@@ -264,7 +310,11 @@ def batch_evaluate_datasets(
     offset = 0
 
     for d_name in dataset_names:
-        _, test_transform = get_transforms(d_name)
+        _, test_transform = get_transforms(
+            d_name,
+            model_name=getattr(args, "model_name", None),
+            test_resize_mode=getattr(args, "eval_resize_mode", "legacy_square"),
+        )
         _, _, te_loader, c_names = get_xtail_trainloader(
             root=root, dataset_name=d_name,
             transform_train=None, transform_test=test_transform,
@@ -331,11 +381,14 @@ def batch_evaluate_datasets(
                 zs_conf = zs_probs.max(dim=-1).values
                 rgda_conf = rgda_probs.max(dim=-1).values
                 alpha_sample = torch.sigmoid(rgda_conf - zs_conf).unsqueeze(-1)
-                ensemble_logits = (1 - alpha_sample) * zs_scores
-                ensemble_logits[:, :num_id_classes] += alpha_sample * rgda_scores
+                ensemble_logits = combine_ensemble_logits(
+                    zs_logits, rgda_logits, num_id_classes, alpha_sample,
+                    ensemble_mode, ensemble_routing,
+                )
             else:
                 ensemble_logits = combine_ensemble_logits(
-                    zs_logits, rgda_logits, num_id_classes, alpha, ensemble_mode
+                    zs_logits, rgda_logits, num_id_classes, alpha,
+                    ensemble_mode, ensemble_routing,
                 )
             ens_preds = ensemble_logits.argmax(dim=1)
             ens_correct += int(ens_preds.eq(labels_chunk).sum().item())
@@ -355,7 +408,8 @@ def batch_evaluate_datasets(
             if alpha_values is not None:
                 for idx, a in enumerate(alpha_values):
                     ens_logits = combine_ensemble_logits(
-                        zs_logits, rgda_logits, num_id_classes, a, ensemble_mode
+                        zs_logits, rgda_logits, num_id_classes, a,
+                        ensemble_mode, ensemble_routing,
                     )
                     ens_preds = ens_logits.argmax(dim=1)
                     sensitivity_correct[idx] += int(ens_preds.eq(labels_chunk).sum().item())

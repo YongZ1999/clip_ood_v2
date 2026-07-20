@@ -465,6 +465,11 @@ def parse_args():
     parser.add_argument("--model_name", type=str, default="openai/clip-vit-base-patch16",
                         help="Hugging Face dual-encoder checkpoint. Official CLIP is the default; "
                              "the supported robustness backbone is google/siglip2-base-patch16-224.")
+    parser.add_argument("--eval_resize_mode", type=str, default="legacy_square",
+                        choices=["legacy_square", "preserve_aspect"],
+                        help="Deterministic X-TAIL classification-test preprocessing. "
+                             "legacy_square reproduces previous runs; preserve_aspect uses "
+                             "standard CLIP Resize(shorter_edge)+CenterCrop. Retrieval preprocessing is unchanged.")
     parser.add_argument("--num_shots", type=int, default=16,
                         help="Number of shots for few-shot learning.")
     parser.add_argument("--full_shot", action="store_true", default=False,
@@ -630,6 +635,11 @@ def parse_args():
                         choices=["zscore", "maxshift", "prob", "raw"],
                         help="Normalization used before fusing zero-shot logits with "
                              "the ID-only LR-RGDA classifier.")
+    parser.add_argument("--ensemble_routing", type=str, default="classwise",
+                        choices=["classwise", "zs_predicted_seen"],
+                        help="classwise applies LR-RGDA to seen-class columns for every sample. "
+                             "zs_predicted_seen keeps pure ZS scores when the ZS argmax is unseen, "
+                             "and otherwise applies the classwise ensemble.")
     parser.add_argument("--classifier_feature_transform", type=str, default="test",
                         choices=["train", "test"],
                         help="Transform for LR-RGDA classifier feature extraction: "
@@ -846,7 +856,10 @@ def main(args):
     eval_bs = args.eval_batch_size if args.eval_batch_size is not None else args.batch_size
     for task_datasets in args.dataset_sequence:
         d_name = task_datasets[0]
-        _, test_transform = get_transforms(d_name, model_name=args.model_name)
+        _, test_transform = get_transforms(
+            d_name, model_name=args.model_name,
+            test_resize_mode=args.eval_resize_mode,
+        )
         _, _, te_loader, c_names = get_xtail_trainloader(
             root=args.root, dataset_name=d_name,
             transform_train=None, transform_test=test_transform,
@@ -894,7 +907,10 @@ def main(args):
         train_loaders = []
         task_class_names = []
         for d_name in task_datasets:
-            train_transform, test_transform = get_transforms(d_name, model_name=args.model_name)
+            train_transform, test_transform = get_transforms(
+                d_name, model_name=args.model_name,
+                test_resize_mode=args.eval_resize_mode,
+            )
             num_shots = None if args.full_shot else args.num_shots
             tr_loader, _, _, c_names = get_xtail_trainloader(
                 root=args.root, dataset_name=d_name,
@@ -1044,7 +1060,10 @@ def main(args):
         label_offset = sum(len(c_names) for c_names in history_class_names)
 
         for d_name in task_datasets:
-            train_transform, test_transform = get_transforms(d_name, model_name=args.model_name)
+            train_transform, test_transform = get_transforms(
+                d_name, model_name=args.model_name,
+                test_resize_mode=args.eval_resize_mode,
+            )
             tr_loader, tr4update, _, c_names = get_xtail_trainloader(
                 root=args.root, dataset_name=d_name,
                 transform_train=train_transform, transform_test=test_transform,
@@ -1394,6 +1413,8 @@ def main(args):
                 "eval_max_samples": args.eval_max_samples,
                 "num_shots": args.num_shots,
                 "full_shot": args.full_shot,
+                "eval_resize_mode": args.eval_resize_mode,
+                "ensemble_routing": args.ensemble_routing,
             },
             "accuracy_matrix": tracker.get_accuracy_matrix().tolist(),
             "metrics": {
@@ -1420,6 +1441,8 @@ def main(args):
             "eval_max_samples": args.eval_max_samples,
             "num_shots": args.num_shots,
             "full_shot": args.full_shot,
+            "eval_resize_mode": args.eval_resize_mode,
+            "ensemble_routing": args.ensemble_routing,
         },
         "accuracy_matrix": metrics_ens.get_accuracy_matrix().tolist(),
         "metrics": {

@@ -61,6 +61,24 @@ def parse_args():
         choices=["zscore", "maxshift", "prob", "raw"],
         help="Normalization used before fusing zero-shot logits with LR-RGDA logits.",
     )
+    parser.add_argument(
+        "--ensemble_routing",
+        default=None,
+        choices=["classwise", "zs_predicted_seen"],
+        help=(
+            "Optional routing override. When omitted, reuse the routing stored "
+            "in the training artifact (or legacy classwise routing)."
+        ),
+    )
+    parser.add_argument(
+        "--eval_resize_mode",
+        default=None,
+        choices=["legacy_square", "preserve_aspect"],
+        help=(
+            "Optional classification-test resize override. When omitted, reuse "
+            "the mode stored in the artifact (or legacy_square for old artifacts)."
+        ),
+    )
     parser.add_argument("--eval_batch_size", type=int, default=None)
     parser.add_argument(
         "--eval_shots_per_class",
@@ -578,6 +596,8 @@ def evaluate_step(
     alphas,
     lada_alphas=None,
     ensemble_normalize="maxshift",
+    ensemble_routing=None,
+    eval_resize_mode=None,
     eval_batch_size_override=None,
     eval_shots_per_class=0,
     eval_subset_seed=0,
@@ -620,8 +640,18 @@ def evaluate_step(
             step_scores[f"lada_zs_{alpha_tag(alpha)}"] = {}
 
     eval_batch_size = eval_batch_size_override or getattr(run_args, "batch_size", 64)
+    ensemble_routing = ensemble_routing or getattr(
+        run_args, "ensemble_routing", "classwise"
+    )
+    eval_resize_mode = eval_resize_mode or getattr(
+        run_args, "eval_resize_mode", "legacy_square"
+    )
     for d_name in task_names:
-        _, test_transform = get_transforms(d_name)
+        _, test_transform = get_transforms(
+            d_name,
+            model_name=getattr(run_args, "model_name", None),
+            test_resize_mode=eval_resize_mode,
+        )
         _, _, te_loader, c_names = get_xtail_trainloader(
             root=run_args.root,
             dataset_name=d_name,
@@ -660,6 +690,7 @@ def evaluate_step(
                         current_num_classes,
                         alpha,
                         ensemble_normalize,
+                        ensemble_routing,
                     )
                     ens_acc = ensemble_logits.argmax(dim=1).eq(labels).float().mean().item()
                     step_scores[f"ens_{variant_name}_{alpha_tag(alpha)}"][d_name] = ens_acc
@@ -832,6 +863,8 @@ def main():
                     alphas,
                     lada_alphas,
                     args.ensemble_normalize,
+                    args.ensemble_routing,
+                    args.eval_resize_mode,
                     args.eval_batch_size,
                     args.eval_shots_per_class,
                     args.eval_subset_seed,
@@ -863,6 +896,8 @@ def main():
                 alphas,
                 lada_alphas,
                 args.ensemble_normalize,
+                args.ensemble_routing,
+                args.eval_resize_mode,
                 args.eval_batch_size,
                 args.eval_shots_per_class,
                 args.eval_subset_seed,
