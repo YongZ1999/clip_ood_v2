@@ -88,8 +88,30 @@ The launcher uses GPU IDs `0,1,2,3,4,5` by default. It starts six jobs in the
 first wave and queues one matched job per GPU for the second wave. It logs all
 commands under `logs/paper_transfer_aware/` and writes JSON/retrieval results
 under `experiments/paper_transfer_aware/E1_main/`. It explicitly selects
-`openai/clip-vit-base-patch16`, sets `CLIP_USE_SAFETENSORS=0`, and sets
-`CLIP_LOCAL_FILES_ONLY=1`, matching the server's cached OpenAI CLIP weights.
+`openai/clip-vit-base-patch16`, sets `CLIP_USE_SAFETENSORS=0`, sets
+`CLIP_LOCAL_FILES_ONLY=1`, and enables `CLIP_OPENAI_PT_FALLBACK=1`.
+
+### Offline OpenAI checkpoint fallback
+
+On a server with a damaged Hugging Face cache and no DNS/network access,
+`src/models/openai_clip_compat.py` maps the available OpenAI
+`~/.cache/clip/ViT-B-16.pt` weights into a Hugging Face `CLIPModel`. This is
+necessary because directly returning the OpenAI `clip.load()` model would use
+fused QKV attention and would no longer be compatible with the repository's
+LoRA-NF wrappers. The fallback therefore preserves the same Hugging Face
+module interface used by the normal experiments, including separate Q/K/V
+projections and the vision/text encoder layer paths.
+
+Before a launch that relies on this fallback, run:
+
+```bash
+python scripts/check_openai_pt_hf_compat.py --device cuda:0
+```
+
+The check verifies the vendored OpenAI tokenizer and compares native versus
+converted image/text features. Do not run E1 if it fails. A healthy Hugging
+Face model cache remains the preferred loading route; the fallback is an
+offline recovery path, not a change to the LoRA-NF method.
 
 Use `DRY_RUN=1` to inspect the six-GPU schedule and fully expanded commands
 without starting training.

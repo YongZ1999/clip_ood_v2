@@ -15,6 +15,7 @@ from src.models.backbone_utils import (
 )
 from transformers import AutoModel, AutoProcessor, CLIPModel, CLIPProcessor
 import os
+import warnings
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -23,6 +24,36 @@ def _env_flag(name, default):
     if value is None:
         return default
     return value.lower() in {"1", "true", "yes", "on"}
+
+
+def _can_use_openai_pt_fallback(model_name: str) -> bool:
+    """Restrict the offline converter to the exact supported CLIP family."""
+    normalized = str(model_name).lower().strip()
+    return normalized in {"openai/clip-vit-base-patch16", "clip-vit-base-patch16"}
+
+
+def _load_openai_pt_fallback(model_name: str, original_error: OSError):
+    """Convert the local OpenAI checkpoint without changing the LoRA API."""
+    fallback_enabled = _env_flag("CLIP_OPENAI_PT_FALLBACK", True)
+    if not (fallback_enabled and _can_use_openai_pt_fallback(model_name)):
+        raise original_error
+    from src.models.openai_clip_compat import (
+        default_openai_clip_checkpoint,
+        has_openai_clip_checkpoint,
+        load_openai_clip_as_hf,
+    )
+    checkpoint = default_openai_clip_checkpoint()
+    if not has_openai_clip_checkpoint(checkpoint):
+        raise OSError(
+            f"Could not load {model_name!r} from Hugging Face and no usable local "
+            f"OpenAI CLIP checkpoint was found at {checkpoint!r}. Original error: {original_error}"
+        ) from original_error
+    warnings.warn(
+        f"Hugging Face CLIP load failed ({original_error}). Falling back to offline conversion "
+        f"of OpenAI checkpoint {checkpoint!r} into Hugging Face CLIPModel.",
+        RuntimeWarning,
+    )
+    return load_openai_clip_as_hf(checkpoint)
 
 
 def get_clip_model(args, train_mode="lora"):
@@ -37,12 +68,48 @@ def get_clip_model(args, train_mode="lora"):
     local_files_only = _env_flag("CLIP_LOCAL_FILES_ONLY", False)
     model_cls = AutoModel if is_siglip2_model_name(model_name) else CLIPModel
     processor_cls = AutoProcessor if is_siglip2_model_name(model_name) else CLIPProcessor
-    model = model_cls.from_pretrained(
-        model_name,
-        use_safetensors=use_safetensors,
-        local_files_only=local_files_only,
-        attn_implementation="sdpa",
-    )
+    try:
+        model = model_cls.from_pretrained(
+            model_name,
+            use_safetensors=use_safetensors,
+            local_files_only=local_files_only,
+            attn_implementation="sdpa",
+        )
+    except OSError as exc:
+        # ``clip.load`` itself is not compatible with this project's LoRA
+        # wrappers (OpenAI CLIP fuses QKV).  Convert the local OpenAI ``.pt``
+        # weights to the existing HF module layout instead, but only for the
+        # known ViT-B/16 checkpoint and only when explicitly enabled.
+        model, processor = _load_openai_pt_fallback(model_name, exc)
+    else:
+        try:
+            processor = processor_cls.from_pretrained(
+                model_name,
+                local_files_only=local_files_only,
+                use_fast=True,
+            )
+        except OSError as exc:
+            # A complete model cache paired with an evicted tokenizer cache is
+            # still usable: retain the HF model and obtain the exact OpenAI
+            # BPE tokenizer from the vendored project files.
+            if not (_env_flag("CLIP_OPENAI_PT_FALLBACK", True)
+                    and _can_use_openai_pt_fallback(model_name)):
+                raise
+            from src.models.openai_clip_compat import (
+                default_openai_clip_checkpoint,
+                has_openai_clip_checkpoint,
+                OpenAIClipProcessorAdapter,
+            )
+            checkpoint = default_openai_clip_checkpoint()
+            if not has_openai_clip_checkpoint(checkpoint):
+                raise
+            warnings.warn(
+                f"Hugging Face CLIP tokenizer load failed ({exc}). Keeping the loaded HF model "
+                "and using the local OpenAI CLIP tokenizer.",
+                RuntimeWarning,
+            )
+            processor = OpenAIClipProcessorAdapter(
+                context_length=model.config.text_config.max_position_embeddings)
     # 关闭 attention 输出，避免 SDPA 回退到 eager / 产生警告，同时减少前向开销
     for cfg in (model.config,
                 getattr(model, "vision_model", None),
@@ -50,12 +117,6 @@ def get_clip_model(args, train_mode="lora"):
         if cfg is not None:
             cfg.output_attentions = False
             cfg.output_hidden_states = False
-    processor = processor_cls.from_pretrained(
-        model_name,
-        local_files_only=local_files_only,
-        use_fast=True,
-    )
-
     if train_mode == "frozen":
         for p in model.parameters():
             p.requires_grad = False

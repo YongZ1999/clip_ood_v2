@@ -19,11 +19,21 @@ git log -1 --oneline
 python -c "import torch, torchvision; print(torch.__version__, torchvision.__version__)"
 nvidia-smi
 python tests/test_transfer_aware_ensemble.py
+python scripts/check_openai_pt_hf_compat.py --device cuda:0
 ```
 
 该分支的 launcher 已固定 `openai/clip-vit-base-patch16`，并导出
-`CLIP_USE_SAFETENSORS=0`、`CLIP_LOCAL_FILES_ONLY=1`，以使用服务器已有的
-OpenAI CLIP `pytorch_model.bin` 缓存。不要手动改成 safetensors。
+`CLIP_USE_SAFETENSORS=0`、`CLIP_LOCAL_FILES_ONLY=1` 和
+`CLIP_OPENAI_PT_FALLBACK=1`。若 Hugging Face cache 可用，仍优先走原来的
+HF 加载；若 cache 损坏且网络/DNS 不可用，则把服务器已有的
+`~/.cache/clip/ViT-B-16.pt` **离线映射为 Hugging Face `CLIPModel`**。
+
+这不是把训练代码替换为 `clip.load()`：后者的 QKV 是融合的，不能被本项目
+的 LoRA-NF 注入器正确包装。转换后的模型仍有
+`vision_model.encoder.layers.*.self_attn.{q,k,v}_proj` 等原有模块，因此
+LoRA-NF、跨模态蒸馏和 LR-RGDA 的算法路径保持不变。`check_openai_pt_hf_compat.py`
+必须先通过（会比较原生 `.pt` 与转换模型的图像/文本特征）；若失败，停止启动
+12 个任务并贴出完整错误，不要尝试把 launcher 改为直接 `clip.load()`。
 
 如果 `git status --short` 显示任何**已跟踪代码文件**被修改，停止运行并报告这些文件；不要使用 `git reset --hard`。`experiments/`、`logs/` 下的未跟踪结果无需删除。
 

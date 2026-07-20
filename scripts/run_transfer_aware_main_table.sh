@@ -17,11 +17,12 @@ RETRIEVAL_DATASETS="${RETRIEVAL_DATASETS:-mscoco_2014_5k}"
 DRY_RUN="${DRY_RUN:-0}"
 MODEL_NAME="${MODEL_NAME:-openai/clip-vit-base-patch16}"
 
-# The server's OpenAI CLIP cache provides pytorch_model.bin rather than
-# model.safetensors.  These exports retain the known-good offline loading
-# behavior, while src/models/clip.py also has a model-family-aware default.
+# Prefer a healthy Hugging Face cache.  If it is absent/corrupted, the project
+# converts ~/.cache/clip/ViT-B-16.pt into the same HF CLIPModel layout used by
+# LoRA-NF, so the existing adapters are never bypassed.
 export CLIP_USE_SAFETENSORS="${CLIP_USE_SAFETENSORS:-0}"
 export CLIP_LOCAL_FILES_ONLY="${CLIP_LOCAL_FILES_ONLY:-1}"
+export CLIP_OPENAI_PT_FALLBACK="${CLIP_OPENAI_PT_FALLBACK:-1}"
 
 IFS=',' read -r -a GPUS <<< "${GPU_IDS}"
 if [[ ${#GPUS[@]} -eq 0 || -z "${GPUS[0]}" ]]; then
@@ -186,7 +187,7 @@ worker() {
   echo "branch: $(git branch --show-current 2>/dev/null || true)"
   echo "commit: $(git rev-parse HEAD 2>/dev/null || true)"
   echo "GPUs: ${GPU_IDS}; jobs: ${#JOBS[@]}; RUN_STANDARD_LORA=${RUN_STANDARD_LORA}; DRY_RUN=${DRY_RUN}"
-  echo "model: ${MODEL_NAME}; CLIP_USE_SAFETENSORS=${CLIP_USE_SAFETENSORS}; CLIP_LOCAL_FILES_ONLY=${CLIP_LOCAL_FILES_ONLY}"
+  echo "model: ${MODEL_NAME}; CLIP_USE_SAFETENSORS=${CLIP_USE_SAFETENSORS}; CLIP_LOCAL_FILES_ONLY=${CLIP_LOCAL_FILES_ONLY}; CLIP_OPENAI_PT_FALLBACK=${CLIP_OPENAI_PT_FALLBACK}"
   echo "Protocol: preserve_aspect + zs_predicted_seen; classifier settings remain mc4ft200."
 } | tee "${LOG_ROOT}/launcher.log"
 
