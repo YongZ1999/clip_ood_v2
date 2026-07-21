@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "step_index": 1,
+  "task_name": "caltech101",
+  "artifact_path": "/data/home/zengyong1/projects/clip_ood_v2/experiments/paper_transfer_aware/dev_seed42/async_eval/artifacts/step_02_caltech101/artifact.pt"
+}

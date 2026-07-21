@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "step_index": 9,
+  "task_name": "sun397",
+  "artifact_path": "/data/home/zengyong1/projects/clip_ood_v2/experiments/paper_transfer_aware/dev_seed42/async_eval/artifacts/step_10_sun397/artifact.pt"
+}

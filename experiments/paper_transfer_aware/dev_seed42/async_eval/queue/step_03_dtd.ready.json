@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "step_index": 2,
+  "task_name": "dtd",
+  "artifact_path": "/data/home/zengyong1/projects/clip_ood_v2/experiments/paper_transfer_aware/dev_seed42/async_eval/artifacts/step_03_dtd/artifact.pt"
+}

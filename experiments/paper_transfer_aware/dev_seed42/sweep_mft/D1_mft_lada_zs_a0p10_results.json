@@ -1,0 +1,203 @@
+{
+  "args": {
+    "task_sequence": [
+      "aircraft",
+      "caltech101",
+      "dtd",
+      "eurosat",
+      "flowers",
+      "food101",
+      "mnist",
+      "oxford_pets",
+      "stanford_cars",
+      "sun397"
+    ],
+    "seed": 42,
+    "method": "lada_zs_a0p10",
+    "eval_max_samples": 0,
+    "eval_shots_per_class": 0,
+    "eval_subset_seed": 0,
+    "rgda_eval_chunk_size": 512,
+    "ensemble_normalize": "maxshift",
+    "num_shots": 16
+  },
+  "accuracy_matrix": [
+    [
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0
+    ],
+    [
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0
+    ],
+    [
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0
+    ],
+    [
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0
+    ],
+    [
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0
+    ],
+    [
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0
+    ],
+    [
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0
+    ],
+    [
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0
+    ],
+    [
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0
+    ],
+    [
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0
+    ]
+  ],
+  "metrics": {
+    "transfer": 0.0,
+    "average": 0.0,
+    "last": 0.0
+  },
+  "per_task_metrics": {
+    "aircraft": {
+      "transfer": 0.0,
+      "average": 0.0,
+      "last": 0.0
+    },
+    "caltech101": {
+      "transfer": 0.0,
+      "average": 0.0,
+      "last": 0.0
+    },
+    "dtd": {
+      "transfer": 0.0,
+      "average": 0.0,
+      "last": 0.0
+    },
+    "eurosat": {
+      "transfer": 0.0,
+      "average": 0.0,
+      "last": 0.0
+    },
+    "flowers": {
+      "transfer": 0.0,
+      "average": 0.0,
+      "last": 0.0
+    },
+    "food101": {
+      "transfer": 0.0,
+      "average": 0.0,
+      "last": 0.0
+    },
+    "mnist": {
+      "transfer": 0.0,
+      "average": 0.0,
+      "last": 0.0
+    },
+    "oxford_pets": {
+      "transfer": 0.0,
+      "average": 0.0,
+      "last": 0.0
+    },
+    "stanford_cars": {
+      "transfer": 0.0,
+      "average": 0.0,
+      "last": 0.0
+    },
+    "sun397": {
+      "transfer": 0.0,
+      "average": 0.0,
+      "last": 0.0
+    }
+  }
+}

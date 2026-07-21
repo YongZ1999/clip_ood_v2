@@ -1,0 +1,19 @@
+| method | Transfer | Average | Last | path |
+|---|---:|---:|---:|---|
+| zero_shot | 61.14 | 71.22 | 80.61 | experiments/paper_transfer_aware/dev_seed42/sweep_alpha/D1_alpha_zero_shot_results.json |
+| rgda_mc4 | 0.00 | 44.43 | 82.36 | experiments/paper_transfer_aware/dev_seed42/sweep_alpha/D1_alpha_rgda_mc4_results.json |
+| ens_mc4_a0p00 | 61.14 | 71.22 | 80.61 | experiments/paper_transfer_aware/dev_seed42/sweep_alpha/D1_alpha_ens_mc4_a0p00_results.json |
+| ens_mc4_a0p01 | 61.57 | 72.49 | 83.39 | experiments/paper_transfer_aware/dev_seed42/sweep_alpha/D1_alpha_ens_mc4_a0p01_results.json |
+| ens_mc4_a0p02 | 61.64 | 72.70 | 83.84 | experiments/paper_transfer_aware/dev_seed42/sweep_alpha/D1_alpha_ens_mc4_a0p02_results.json |
+| ens_mc4_a0p05 | 61.68 | 72.69 | 83.83 | experiments/paper_transfer_aware/dev_seed42/sweep_alpha/D1_alpha_ens_mc4_a0p05_results.json |
+| ens_mc4_a0p08 | 61.70 | 72.60 | 83.56 | experiments/paper_transfer_aware/dev_seed42/sweep_alpha/D1_alpha_ens_mc4_a0p08_results.json |
+| ens_mc4_a0p10 | 61.70 | 72.54 | 83.38 | experiments/paper_transfer_aware/dev_seed42/sweep_alpha/D1_alpha_ens_mc4_a0p10_results.json |
+| ens_mc4_a0p15 | 61.70 | 72.44 | 83.12 | experiments/paper_transfer_aware/dev_seed42/sweep_alpha/D1_alpha_ens_mc4_a0p15_results.json |
+| ens_mc4_a0p20 | 61.71 | 72.37 | 82.89 | experiments/paper_transfer_aware/dev_seed42/sweep_alpha/D1_alpha_ens_mc4_a0p20_results.json |
+| lada_zs_a0p00 | 0.00 | 0.00 | 0.00 | experiments/paper_transfer_aware/dev_seed42/sweep_alpha/D1_alpha_lada_zs_a0p00_results.json |
+| lada_zs_a0p05 | 0.00 | 0.00 | 0.00 | experiments/paper_transfer_aware/dev_seed42/sweep_alpha/D1_alpha_lada_zs_a0p05_results.json |
+| lada_zs_a0p10 | 0.00 | 0.00 | 0.00 | experiments/paper_transfer_aware/dev_seed42/sweep_alpha/D1_alpha_lada_zs_a0p10_results.json |
+| lada_zs_a0p20 | 0.00 | 0.00 | 0.00 | experiments/paper_transfer_aware/dev_seed42/sweep_alpha/D1_alpha_lada_zs_a0p20_results.json |
+| lada_zs_a0p50 | 0.00 | 0.00 | 0.00 | experiments/paper_transfer_aware/dev_seed42/sweep_alpha/D1_alpha_lada_zs_a0p50_results.json |
+| lada_zs_a1p00 | 0.00 | 0.00 | 0.00 | experiments/paper_transfer_aware/dev_seed42/sweep_alpha/D1_alpha_lada_zs_a1p00_results.json |
+| lada | 0.00 | 0.00 | 0.00 | experiments/paper_transfer_aware/dev_seed42/sweep_alpha/D1_alpha_lada_results.json |
