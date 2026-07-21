@@ -1,0 +1,26 @@
+| method | Transfer | Average | Last | path |
+|---|---:|---:|---:|---|
+| zero_shot | 61.14 | 71.22 | 80.61 | experiments/paper_transfer_aware/dev_seed42/sweep_rank/D2_rank_zero_shot_results.json |
+| rgda_r8 | 0.00 | 44.70 | 82.79 | experiments/paper_transfer_aware/dev_seed42/sweep_rank/D2_rank_rgda_r8_results.json |
+| ens_r8_a0p01 | 61.57 | 72.53 | 83.45 | experiments/paper_transfer_aware/dev_seed42/sweep_rank/D2_rank_ens_r8_a0p01_results.json |
+| ens_r8_a0p02 | 61.64 | 72.75 | 83.95 | experiments/paper_transfer_aware/dev_seed42/sweep_rank/D2_rank_ens_r8_a0p02_results.json |
+| ens_r8_a0p05 | 61.68 | 72.83 | 84.07 | experiments/paper_transfer_aware/dev_seed42/sweep_rank/D2_rank_ens_r8_a0p05_results.json |
+| rgda_r15 | 0.00 | 44.70 | 82.79 | experiments/paper_transfer_aware/dev_seed42/sweep_rank/D2_rank_rgda_r15_results.json |
+| ens_r15_a0p01 | 61.57 | 72.53 | 83.45 | experiments/paper_transfer_aware/dev_seed42/sweep_rank/D2_rank_ens_r15_a0p01_results.json |
+| ens_r15_a0p02 | 61.64 | 72.75 | 83.93 | experiments/paper_transfer_aware/dev_seed42/sweep_rank/D2_rank_ens_r15_a0p02_results.json |
+| ens_r15_a0p05 | 61.68 | 72.83 | 84.05 | experiments/paper_transfer_aware/dev_seed42/sweep_rank/D2_rank_ens_r15_a0p05_results.json |
+| rgda_r24 | 0.00 | 44.70 | 82.79 | experiments/paper_transfer_aware/dev_seed42/sweep_rank/D2_rank_rgda_r24_results.json |
+| ens_r24_a0p01 | 61.57 | 72.53 | 83.45 | experiments/paper_transfer_aware/dev_seed42/sweep_rank/D2_rank_ens_r24_a0p01_results.json |
+| ens_r24_a0p02 | 61.64 | 72.75 | 83.93 | experiments/paper_transfer_aware/dev_seed42/sweep_rank/D2_rank_ens_r24_a0p02_results.json |
+| ens_r24_a0p05 | 61.68 | 72.83 | 84.05 | experiments/paper_transfer_aware/dev_seed42/sweep_rank/D2_rank_ens_r24_a0p05_results.json |
+| rgda_r32 | 0.00 | 44.70 | 82.79 | experiments/paper_transfer_aware/dev_seed42/sweep_rank/D2_rank_rgda_r32_results.json |
+| ens_r32_a0p01 | 61.57 | 72.53 | 83.45 | experiments/paper_transfer_aware/dev_seed42/sweep_rank/D2_rank_ens_r32_a0p01_results.json |
+| ens_r32_a0p02 | 61.64 | 72.75 | 83.93 | experiments/paper_transfer_aware/dev_seed42/sweep_rank/D2_rank_ens_r32_a0p02_results.json |
+| ens_r32_a0p05 | 61.68 | 72.83 | 84.05 | experiments/paper_transfer_aware/dev_seed42/sweep_rank/D2_rank_ens_r32_a0p05_results.json |
+| lada_zs_a0p00 | 0.00 | 0.00 | 0.00 | experiments/paper_transfer_aware/dev_seed42/sweep_rank/D2_rank_lada_zs_a0p00_results.json |
+| lada_zs_a0p05 | 0.00 | 0.00 | 0.00 | experiments/paper_transfer_aware/dev_seed42/sweep_rank/D2_rank_lada_zs_a0p05_results.json |
+| lada_zs_a0p10 | 0.00 | 0.00 | 0.00 | experiments/paper_transfer_aware/dev_seed42/sweep_rank/D2_rank_lada_zs_a0p10_results.json |
+| lada_zs_a0p20 | 0.00 | 0.00 | 0.00 | experiments/paper_transfer_aware/dev_seed42/sweep_rank/D2_rank_lada_zs_a0p20_results.json |
+| lada_zs_a0p50 | 0.00 | 0.00 | 0.00 | experiments/paper_transfer_aware/dev_seed42/sweep_rank/D2_rank_lada_zs_a0p50_results.json |
+| lada_zs_a1p00 | 0.00 | 0.00 | 0.00 | experiments/paper_transfer_aware/dev_seed42/sweep_rank/D2_rank_lada_zs_a1p00_results.json |
+| lada | 0.00 | 0.00 | 0.00 | experiments/paper_transfer_aware/dev_seed42/sweep_rank/D2_rank_lada_results.json |
