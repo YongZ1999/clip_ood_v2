@@ -1,0 +1,185 @@
+{
+  "schema_version": 1,
+  "summary": {
+    "LoRA-NF 16-shot Ens": {
+      "runs": [
+        {
+          "path": "experiments/paper_transfer_aware/E1_main/E1TA__lora_nf__16shot__seed42_ens_results.json",
+          "metrics": {
+            "transfer": 61.672302287932645,
+            "average": 72.66902959346771,
+            "last": 83.77718210220337
+          }
+        },
+        {
+          "path": "experiments/paper_transfer_aware/E1_main/E1TA__lora_nf__16shot__seed43_ens_results.json",
+          "metrics": {
+            "transfer": 61.960590673081676,
+            "average": 72.58092680573463,
+            "last": 83.7782746553421
+          }
+        },
+        {
+          "path": "experiments/paper_transfer_aware/E1_main/E1TA__lora_nf__16shot__seed44_ens_results.json",
+          "metrics": {
+            "transfer": 62.10676985258989,
+            "average": 72.65015015006067,
+            "last": 83.60471546649933
+          }
+        }
+      ],
+      "metrics": {
+        "transfer": {
+          "mean": 61.91322093786807,
+          "std": 0.1805056509650137,
+          "n": 3
+        },
+        "average": {
+          "mean": 72.63336884975433,
+          "std": 0.037874655831777224,
+          "n": 3
+        },
+        "last": {
+          "mean": 83.72005740801494,
+          "std": 0.08156028863171141,
+          "n": 3
+        }
+      }
+    },
+    "LoRA 16-shot Ens": {
+      "runs": [
+        {
+          "path": "experiments/paper_transfer_aware/E1_main/E1TA__lora__16shot__seed42_ens_results.json",
+          "metrics": {
+            "transfer": 61.66564934231617,
+            "average": 72.09466958045961,
+            "last": 82.22177505493164
+          }
+        },
+        {
+          "path": "experiments/paper_transfer_aware/E1_main/E1TA__lora__16shot__seed43_ens_results.json",
+          "metrics": {
+            "transfer": 61.42066561907688,
+            "average": 71.73280054330826,
+            "last": 82.20450162887573
+          }
+        },
+        {
+          "path": "experiments/paper_transfer_aware/E1_main/E1TA__lora__16shot__seed44_ens_results.json",
+          "metrics": {
+            "transfer": 61.6843782065722,
+            "average": 71.40933972597122,
+            "last": 81.70349657535553
+          }
+        }
+      ],
+      "metrics": {
+        "transfer": {
+          "mean": 61.59023105598842,
+          "std": 0.1201444148662509,
+          "n": 3
+        },
+        "average": {
+          "mean": 71.74560328324635,
+          "std": 0.27993116412874375,
+          "n": 3
+        },
+        "last": {
+          "mean": 82.0432577530543,
+          "std": 0.2403509048805783,
+          "n": 3
+        }
+      }
+    },
+    "LoRA-NF Full Ens": {
+      "runs": [
+        {
+          "path": "experiments/paper_transfer_aware/E1_main/E1TA__lora_nf__fullshot__seed42_ens_results.json",
+          "metrics": {
+            "transfer": 61.71536176082739,
+            "average": 74.9737968146801,
+            "last": 86.20343029499054
+          }
+        },
+        {
+          "path": "experiments/paper_transfer_aware/E1_main/E1TA__lora_nf__fullshot__seed43_ens_results.json",
+          "metrics": {
+            "transfer": 61.987438805309345,
+            "average": 74.99042832851408,
+            "last": 86.19141221046448
+          }
+        },
+        {
+          "path": "experiments/paper_transfer_aware/E1_main/E1TA__lora_nf__fullshot__seed44_ens_results.json",
+          "metrics": {
+            "transfer": 61.97238899123521,
+            "average": 74.98514342308044,
+            "last": 86.16966903209686
+          }
+        }
+      ],
+      "metrics": {
+        "transfer": {
+          "mean": 61.89172985245731,
+          "std": 0.12486232961359942,
+          "n": 3
+        },
+        "average": {
+          "mean": 74.98312285542488,
+          "std": 0.006938483664344253,
+          "n": 3
+        },
+        "last": {
+          "mean": 86.18817051251729,
+          "std": 0.013972286193976339,
+          "n": 3
+        }
+      }
+    },
+    "LoRA Full Ens": {
+      "runs": [
+        {
+          "path": "experiments/paper_transfer_aware/E1_main/E1TA__lora__fullshot__seed42_ens_results.json",
+          "metrics": {
+            "transfer": 61.23923730308838,
+            "average": 74.2091612815857,
+            "last": 84.93447065353394
+          }
+        },
+        {
+          "path": "experiments/paper_transfer_aware/E1_main/E1TA__lora__fullshot__seed43_ens_results.json",
+          "metrics": {
+            "transfer": 61.54004991001973,
+            "average": 74.34719881415367,
+            "last": 84.94113385677338
+          }
+        },
+        {
+          "path": "experiments/paper_transfer_aware/E1_main/E1TA__lora__fullshot__seed44_ens_results.json",
+          "metrics": {
+            "transfer": 61.90070666543601,
+            "average": 74.43038243055342,
+            "last": 84.82874035835266
+          }
+        }
+      ],
+      "metrics": {
+        "transfer": {
+          "mean": 61.5599979595147,
+          "std": 0.27041187454219534,
+          "n": 3
+        },
+        "average": {
+          "mean": 74.32891417543094,
+          "std": 0.09123393081365584,
+          "n": 3
+        },
+        "last": {
+          "mean": 84.90144828955333,
+          "std": 0.051484185364458014,
+          "n": 3
+        }
+      }
+    }
+  }
+}
