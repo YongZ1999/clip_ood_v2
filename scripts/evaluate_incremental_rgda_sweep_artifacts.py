@@ -8,6 +8,8 @@ import json
 import os
 import random
 import sys
+
+import numpy as np
 import time
 from argparse import Namespace
 from collections import defaultdict
@@ -108,6 +110,16 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--eval_seed",
+        type=int,
+        default=42,
+        help=(
+            "Global random seed for deterministic offline evaluation. "
+            "Fixes Python random, NumPy, torch CPU/CUDA RNGs so repeated "
+            "runs with gmm_sample produce identical results."
+        ),
+    )
+    parser.add_argument(
         "--poll_interval",
         type=float,
         default=0.0,
@@ -157,6 +169,8 @@ def parse_variants(raw):
                 if value not in ("none", "center_replay", "gmm_mean", "gmm_sample"):
                     raise ValueError(f"Unsupported fit source for variant {parts[0]}: {value}")
                 variant["source"] = value
+            elif key in ("rank", "r"):
+                variant["rank"] = int(value)
             else:
                 raise ValueError(f"Unknown variant key: {key}")
         if not variant["name"]:
@@ -444,7 +458,7 @@ def build_rgda_classifier(artifact, run_args, variant, device):
     classifier = LRRGDAClassifier(
         stats_dict=stats_dict,
         device=device,
-        rank=getattr(run_args, "rgda_rank", 32),
+        rank=variant.get("rank", getattr(run_args, "rgda_rank", 32)),
         qda_reg_alpha1=getattr(run_args, "rgda_alpha1", 0.2),
         qda_reg_alpha2=getattr(run_args, "rgda_alpha2", 2.0),
         qda_reg_alpha3=getattr(run_args, "rgda_alpha3", 0.5),
@@ -809,6 +823,11 @@ def _save_results(args, trackers, method_names, task_names, run_args):
 
 def main():
     args = parse_args()
+    random.seed(args.eval_seed)
+    np.random.seed(args.eval_seed)
+    torch.manual_seed(args.eval_seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.eval_seed)
     if args.device is None:
         if args.gpu is not None and torch.cuda.is_available():
             args.device = f"cuda:{args.gpu}"
