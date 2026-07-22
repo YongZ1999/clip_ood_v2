@@ -14,14 +14,22 @@ git log -1 --oneline
 完整阅读并严格执行：
 docs/final_evidence_experiment_plan.md
 
-这是最终证据补齐，不是继续调参。禁止修改算法代码、禁止搜索 alpha/RGDA rank/fit/M、训练步数、NSP/CD 超参数，禁止重跑 E1、LADA、SigLIP2、full-shot、R1 或 D1/D2。
+这是最终证据补齐，不是继续调参。禁止修改算法代码、禁止搜索 alpha/RGDA rank/fit/M、训练步数、NSP/CD 超参数，禁止重跑原始 E1、LADA、SigLIP2、full-shot、R1 或 D1/D2。唯一允许的 E1-like 新训练是文档指定的 E0-PA resize-only 对照。
 
 先检查环境与权重兼容性：
 python scripts/check_openai_pt_hf_compat.py --device cuda:0
 
 检查失败就停止并报告；禁止用原生 clip.load() 替换项目的 Hugging Face-compatible fallback。
 
-本轮总共只训练 12 个任务，按两个六卡波次执行。先用 nvidia-smi 选择 GPU 0--5 中的空闲卡；若某张不空闲则等待/排队，不要杀任何无关进程。
+本轮总共训练 15 个任务。先用 nvidia-smi 选择 GPU 0--5 中的空闲卡；若某张不空闲则等待/排队，不要杀任何无关进程。若已有 E2/E3 任务在运行，不中断它们；把 E0-PA 排到随后可用的 GPU。
+
+Phase 0：运行 3 个 E0-PA LoRA-NF 16-shot resize-only 对照（seed=42、43、44）。
+  必须以 experiments/paper_formal/E1_main 的旧 LoRA-NF 16-shot 三 seed 配置为基准：保持 800 iterations、全部 LoRA/NSP/FD/CD/RGDA 参数、alpha=.05、maxshift、alpha_sensitivity=true、两个 retrieval datasets，以及历史 --ensemble_routing classwise。
+  唯一有意变化是添加 --eval_resize_mode preserve_aspect。不要使用 zs_predicted_seen。
+  输出：experiments/paper_transfer_aware/E0_resize_only/
+  日志：logs/paper_transfer_aware/E0_resize_only/
+  命名：E0PA__lora_nf__16shot__seed42、E0PA__lora_nf__16shot__seed43、E0PA__lora_nf__16shot__seed44。
+  结束后生成 E0_RESIZE_ONLY_SUMMARY.md：与旧 paper_formal E1 的同 seed JSON 对比，报告 ZS/Ens T/A/L 逐 seed、mean ± sample std、E0−legacy 差值和原始路径。不要将 retrieval 差异归因于分类 resize。
 
 Phase A：先并行运行 6 个 E2-TA 训练：
   C0(fd=0,cd=0), C1(fd=1,cd=0), C2(fd=0,cd=2)，各 seed=43、44。
@@ -42,12 +50,13 @@ Phase B：等 Phase A 六个任务全部成功结束后，再并行运行 6 个 
 
 每个训练任务完成后核对同名主 JSON、*_zs_results.json、*_rgda_results.json、*_ens_results.json、*_retrieval.json 均存在。任务失败时保留日志，其他任务可继续；最后集中报告失败任务，不能伪造或补写结果。
 
-全部 12 个任务完成后：
-1. 生成 experiments/paper_transfer_aware/E2_distill_3seed/E2_TA_3SEED_SUMMARY.md。C0/C1/C2 的 seed42 复用 E2_distill_seed42，43/44 用本轮；C3 三个 seed 全部复用 E1_main 的 LoRA-NF 16-shot JSON，绝不能混入 dev_seed42。报告 ZS/Ens T/A/L 和 MSCOCO I2T/T2I R@1/5/10 的任务均值与 Last，全部用 mean ± sample std，并列出原始文件路径。
-2. 生成 experiments/paper_transfer_aware/E3_adapters_3seed/E3_TA_3SEED_SUMMARY.md。LoRA 与 LoRA-NF 复用 E1_main 16-shot 三 seed；LoRA-Null 与 GradProj 用本轮结果。报告同样的分类和检索指标、样本标准差、原始路径与排名。
-3. 从原始 JSON 独立复算每个 K×K accuracy matrix 的 Transfer/Average/Last，确认与 JSON metrics 一致；汇总中记录检查数量与任何异常。
-4. 不修改 docs/paper_experiment_results.md，也不替换历史 legacy 结果。
-5. 仅 git add/commit/push 本轮的 JSON、两份 summary Markdown、必要新增 launcher/summary 脚本和一份 chat-history 记录；绝不提交 logs、artifact.pt、checkpoint、数据集或缓存。推到同一分支。
+全部 15 个任务完成后：
+1. 核对并完成 experiments/paper_transfer_aware/E0_resize_only/E0_RESIZE_ONLY_SUMMARY.md。
+2. 生成 experiments/paper_transfer_aware/E2_distill_3seed/E2_TA_3SEED_SUMMARY.md。C0/C1/C2 的 seed42 复用 E2_distill_seed42，43/44 用本轮；C3 三个 seed 全部复用 E1_main 的 LoRA-NF 16-shot JSON，绝不能混入 dev_seed42。报告 ZS/Ens T/A/L 和 MSCOCO I2T/T2I R@1/5/10 的任务均值与 Last，全部用 mean ± sample std，并列出原始文件路径。
+3. 生成 experiments/paper_transfer_aware/E3_adapters_3seed/E3_TA_3SEED_SUMMARY.md。LoRA 与 LoRA-NF 复用 E1_main 16-shot 三 seed；LoRA-Null 与 GradProj 用本轮结果。报告同样的分类和检索指标、样本标准差、原始路径与排名。
+4. 从原始 JSON 独立复算每个 K×K accuracy matrix 的 Transfer/Average/Last，确认与 JSON metrics 一致；汇总中记录检查数量与任何异常。
+5. 不修改 docs/paper_experiment_results.md，也不替换历史 legacy 结果。
+6. 仅 git add/commit/push 本轮的 JSON、三份 summary Markdown、必要新增 launcher/summary 脚本和一份 chat-history 记录；绝不提交 logs、artifact.pt、checkpoint、数据集或缓存。推到同一分支。
 
-最后回复：commit SHA、12 个任务逐项成功/失败状态、两个 summary 文件路径、每个表的核心数值、原始 JSON 数量、是否存在重跑或失败。
+最后回复：commit SHA、15 个任务逐项成功/失败状态、三份 summary 文件路径、每个表的核心数值、原始 JSON 数量、是否存在重跑或失败。
 ```

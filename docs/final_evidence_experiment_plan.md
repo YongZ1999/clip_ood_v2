@@ -2,7 +2,7 @@
 
 **分支**: `agent/transfer-gated-ensemble`
 
-**目标**: 在不继续进行 classifier-only 调参的前提下，补齐当前论文最缺少的多 seed 证据：新协议下的蒸馏组件结论与 adapter family 对比。所有训练使用已完成 E1 完全一致的 OpenAI CLIP ViT-B/16、X-TAIL 顺序和训练配方。
+**目标**: 在不继续进行 classifier-only 调参的前提下，先隔离验证标准 CLIP 测试预处理的影响，再补齐新协议下的蒸馏组件结论与 adapter family 对比。所有训练使用 OpenAI CLIP ViT-B/16 与相同 X-TAIL 任务顺序。
 
 ## 1. 已完成、不可重做的结论
 
@@ -17,7 +17,50 @@
 
 不要在本计划之外扫描 alpha、RGDA rank/fit/M、训练步数、`nsp_weight`、NSP epsilon、CD temperature 或 CD weight。这些会将最终结果变成事后优化，且 D1/D2 已显示分类器方向饱和。
 
-## 2. 统一固定配置
+## 2. Phase 0 — E0-PA：仅 `preserve_aspect` 的正式三-seed 对照（最高优先级，3 个训练任务）
+
+### 科学问题
+
+旧 `paper_formal` E1 的 LoRA-NF 最佳 16-shot 配置使用默认
+`legacy_square + classwise`，而 transfer-aware E1 同时改为了
+`preserve_aspect + zs_predicted_seen`。R1 已表明 gate 在 seed 42 没有
+可测分类影响，但这不是 `preserve_aspect` 的隔离实验。
+
+本阶段只验证一个问题：**把旧最佳 LoRA-NF 配置的分类测试 resize 改成标准 CLIP 的保持宽高比方式，是否改善 Transfer/Average，而不牺牲 Last？**
+
+### 严格固定与唯一变量
+
+运行 LoRA-NF 16-shot 的 seeds 42/43/44。每个参数与旧 E1
+`experiments/paper_formal/E1_main/E1__lora_nf__16shot__seed{42,43,44}.json`
+保持一致，包括：800 iterations、AdamW、NSP、FD=1、CD=2、所有 LoRA/RGDA
+参数、`alpha=.05`、`maxshift`、两个 retrieval datasets、`alpha_sensitivity=true`
+以及历史融合方式 `--ensemble_routing classwise`。
+
+唯一有意的实验变量是：
+
+```text
+旧 E1: default eval_resize_mode=legacy_square
+E0-PA: --eval_resize_mode preserve_aspect
+```
+
+`--model_name openai/clip-vit-base-patch16` 可显式传入，因为它就是旧 E1 的 parser 默认值；这只消除记录歧义，不构成模型替换。服务器因损坏 cache 使用的 `.pt`→HF fallback 必须先通过兼容性检查，它只是同一 OpenAI ViT-B/16 权重的加载恢复路径。
+
+### 输出与验收
+
+结果输出：`experiments/paper_transfer_aware/E0_resize_only/`；日志：
+`logs/paper_transfer_aware/E0_resize_only/`；名称：
+
+```text
+E0PA__lora_nf__16shot__seed42
+E0PA__lora_nf__16shot__seed43
+E0PA__lora_nf__16shot__seed44
+```
+
+生成 `E0_RESIZE_ONLY_SUMMARY.md`。将 E0 与旧 E1 的三个同 seed 原始 JSON 并列，报告 ZS/Ens Transfer/Average/Last 的逐 seed 数值、mean ± **sample std** 与 E0−legacy 的差值。检索与分类 resize 无关，但仍保存旧 E1 同配方的两个 retrieval datasets，以保证训练命令未被其他方式缩减；不把 retrieval 差异解释为 resize 效果。
+
+该实验的正确结论边界：它是三条独立、同配置同 seed 的训练轨迹之间的受控比较，仍可能有极小非确定性训练波动；但它将移除 routing 这个混杂因素，是当前可行的正式三-seed resize 消融。
+
+## 3. 其余训练的统一固定配置
 
 除实验表中明确列出的差异外，**每个训练任务必须逐字匹配** `scripts/run_transfer_aware_main_table.sh` 的 16-shot LoRA-NF 配置：
 
@@ -50,7 +93,7 @@ python scripts/check_openai_pt_hf_compat.py --device cuda:0
 
 若该检查失败，停止并报告，不要将实验静默改成原生 `clip.load()` 或改用不同 backbone。
 
-## 3. Phase A — E2-TA 蒸馏组件补齐（最高优先级，6 个训练任务）
+## 4. Phase A — E2-TA 蒸馏组件补齐（6 个训练任务）
 
 ### 科学问题
 
@@ -89,7 +132,7 @@ E2TA__C2__seed43, E2TA__C2__seed44.
 
 只有当 C2/C3 相对 C0 的趋势在三个 seed 中一致时，才可在正文作较强的“CD 是主要组件”表述；否则仅保留描述性表格。
 
-## 4. Phase B — E3-TA adapter family 公平对比（6 个训练任务）
+## 5. Phase B — E3-TA adapter family 公平对比（6 个训练任务）
 
 ### 科学问题
 
@@ -124,21 +167,23 @@ E3TA__gradproj__seed{42,43,44}
 
 若排序与 legacy E3 不同，应如实报告新协议结果并不再沿用旧排名；不允许选择性保留更好的一套数值。
 
-## 5. 资源与执行顺序
+## 6. 资源与执行顺序
 
-总新增 encoder-training runs：**12**。六张卡可分两波：
+总新增 encoder-training runs：**15**。六张卡按以下顺序执行：
 
-1. 第一波：Phase A 的 6 个 E2 任务，一卡一个；
-2. 第二波：Phase B 的 6 个 E3 任务，一卡一个；
-3. 阶段完成后在一张空闲 GPU 上做结果汇总和原始 JSON 完整性检查。
+1. Phase 0：E0-PA 的 3 个任务，可在三张空闲 GPU 并行；
+2. Phase A：6 个 E2 任务，一卡一个；
+3. Phase B：6 个 E3 任务，一卡一个；
+4. 阶段完成后在一张空闲 GPU 上做结果汇总和原始 JSON 完整性检查。
 
-不要将 Phase A 与 B 混在同一输出目录；若 GPU 暂时不空闲，排队等待，绝不杀无关任务。每个 run 完成后检查存在 `*_zs_results.json`、`*_rgda_results.json`、`*_ens_results.json`、`*_retrieval.json` 与主 `*.json`。
+不要将三个阶段混在同一输出目录；若 GPU 暂时不空闲，排队等待，绝不杀无关任务。若已有 E2/E3 任务在跑，不中断它们；只将 E0-PA 排入随后可用的三张卡。每个 run 完成后检查存在 `*_zs_results.json`、`*_rgda_results.json`、`*_ens_results.json`、`*_retrieval.json` 与主 `*.json`。
 
-## 6. 最终的证据层级
+## 7. 最终的证据层级
 
 完成本计划后，论文可使用：
 
 - **正式三 seed 主结果**：E1（LoRA-NF vs Standard LoRA）；
+- **正式三 seed 评估协议消融**：E0-PA（仅 `preserve_aspect`）；
 - **正式三 seed 组件与检索证据**：E2-TA（C0--C3）；
 - **正式三 seed adapter family 对比**：E3-TA（LoRA / LoRA-Null / GradProj / LoRA-NF）；
 - **辅助单 seed 诊断**：R1 gate、D1/D2 classifier saturation；不作为强性能主张。
