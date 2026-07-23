@@ -141,9 +141,12 @@ D1/D2 复用一条 seed-42 encoder artifact 轨迹扫描 alpha、centers、fit i
 ## 10. 复现与材料入口
 
 - E1 launcher：`scripts/run_transfer_aware_main_table.sh`
-- E1 protocol：`docs/transfer_aware_main_experiment.md`
-- R1/R2 plan：`docs/transfer_aware_followup_experiment_plan.md`
-- server prompts：`docs/server_model_prompt_transfer_aware_main.md`、`docs/server_model_prompt_transfer_aware_followups.md`
+- 已完成的 E1、R1/R2 运行计划与服务器提示已从 `docs/` 清理；其设计、执行与审计过程见
+  `chat-history/2026-07-20-02-transfer-hyperparameter-diagnosis.md`、
+  `chat-history/2026-07-21-01-transfer-aware-e1-result-audit.md`、
+  `chat-history/2026-07-22-03-transfer-aware-implementation-consolidation.md`、
+  `chat-history/2026-07-22-04-final-transfer-aware-evidence-plan.md` 和
+  `chat-history/2026-07-24-01-transfer-optimization-final-results-and-doc-cleanup.md`。
 - E1 source results：`experiments/paper_transfer_aware/E1_main/`
 - R1 source results：`experiments/paper_transfer_aware/E6_gate_seed42/`
 - R2 source results：`experiments/paper_transfer_aware/E2_distill_seed42/`
