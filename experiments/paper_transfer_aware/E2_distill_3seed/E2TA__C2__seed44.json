@@ -1,0 +1,357 @@
+{
+  "mode": "Incremental Learning",
+  "timestamp": "2026-07-22 21:19:48",
+  "dataset_order": [
+    "aircraft",
+    "caltech101",
+    "dtd",
+    "eurosat",
+    "flowers",
+    "food101",
+    "mnist",
+    "oxford_pets",
+    "stanford_cars",
+    "sun397"
+  ],
+  "arguments": {
+    "id_datasets": [
+      "aircraft",
+      "caltech101",
+      "dtd",
+      "eurosat",
+      "flowers",
+      "food101",
+      "mnist",
+      "oxford_pets",
+      "stanford_cars",
+      "sun397"
+    ],
+    "root": "/data1/open_datasets/X-TAIL",
+    "model_name": "openai/clip-vit-base-patch16",
+    "eval_resize_mode": "preserve_aspect",
+    "num_shots": 16,
+    "full_shot": false,
+    "batch_size": 32,
+    "eval_batch_size": 128,
+    "eval_keep_features_on_device": false,
+    "eval_max_samples": 0,
+    "dataset_sequence": [
+      [
+        "aircraft"
+      ],
+      [
+        "caltech101"
+      ],
+      [
+        "dtd"
+      ],
+      [
+        "eurosat"
+      ],
+      [
+        "flowers"
+      ],
+      [
+        "food101"
+      ],
+      [
+        "mnist"
+      ],
+      [
+        "oxford_pets"
+      ],
+      [
+        "stanford_cars"
+      ],
+      [
+        "sun397"
+      ]
+    ],
+    "seed": 44,
+    "gpu": 0,
+    "device": "cuda:0",
+    "iterations": 800,
+    "train_budget_mode": "uniform",
+    "dataset_epoch_overrides": null,
+    "use_lada_recipe_defaults": false,
+    "lr": 0.0001,
+    "eta_min": 0.0,
+    "weight_decay": 3e-05,
+    "scheduler": "cosine_with_warmup",
+    "warmup_ratio": 0.1,
+    "optimizer": "adamw",
+    "momentum": 0.9,
+    "lora_rank": 4,
+    "lora_alpha": 4.0,
+    "lora_dropout": 0.0,
+    "lora_target_modules": [
+      "q_proj",
+      "k_proj",
+      "v_proj",
+      "out_proj",
+      "fc1",
+      "fc2"
+    ],
+    "lora_type": "lora_nsp",
+    "use_dora": false,
+    "init_mode": "lora_nsp",
+    "projection_param_mode": "full",
+    "basis_rank": 128,
+    "basis_window": "tail",
+    "null_init_mode": "none",
+    "nsp_eps": 0.2,
+    "nsp_weight": 0.02,
+    "use_soft_projection": false,
+    "use_gradient_projection": false,
+    "weight_temp": 1.0,
+    "weight_kind": "log1p",
+    "weight_p": 1.0,
+    "reference_dataset": "flickr8k",
+    "reference_batch_size": 32,
+    "num_workers": 6,
+    "amp": true,
+    "fd_weight": 0.0,
+    "cd_weight": 2.0,
+    "cd_divergence": "kl_forward",
+    "cd_temperature": 4.0,
+    "aux_weight": 0.0,
+    "sce_a": 0.5,
+    "sce_b": 0.5,
+    "alpha": 0.05,
+    "alpha_sensitivity": false,
+    "n_alpha_samples": 21,
+    "alpha_sweep_batch_size": 512,
+    "temperature": 1.0,
+    "adaptive_ensemble": false,
+    "ensemble_normalize": "maxshift",
+    "ensemble_routing": "zs_predicted_seen",
+    "classifier_feature_transform": "test",
+    "rgda_rank": 32,
+    "rgda_alpha1": 0.2,
+    "rgda_alpha2": 2.0,
+    "rgda_alpha3": 0.5,
+    "rgda_train_iter": 200,
+    "rgda_train_lr": 0.01,
+    "rgda_fit_source": "gmm_sample",
+    "tune_text_encoder": true,
+    "text_adapter_type": "matched",
+    "text_adapter_dim": 16,
+    "text_adapter_scale": 0.1,
+    "text_lora_rank": 4,
+    "max_zs_classes": 128,
+    "tune_vision_encoder": true,
+    "text_tuning_schedule": "always",
+    "text_schedule_switch_task": 1,
+    "text_lr_scale_after_task": 0.2,
+    "num_centers": 4,
+    "artifact_num_centers": "1,4",
+    "text_classifier_mode": "lada_hybrid",
+    "enable_lada": false,
+    "disable_lada": true,
+    "lada_k": 16,
+    "lada_beta": 1.0,
+    "lada_score_mode": "exp_sum",
+    "lada_alpha": 0.05,
+    "lada_train_iter": 0,
+    "lada_train_lr": 0.01,
+    "use_gaussian_features": false,
+    "gmm_k": 4,
+    "gmm_sample_mode": "mean",
+    "gmm_fit_space": "raw",
+    "gaussian_samples_per_class": 16,
+    "enable_retrieval_eval": true,
+    "retrieval_datasets": "mscoco_2014_5k",
+    "retrieval_root": "/data/home/zengyong1/dataset",
+    "retrieval_roots": "flickr8k=/mnt/open_datasets/flickr8k,coco_val2014=/mnt/raoxuan/open_datasets/coco_val2014,coco_val2014_hf=/mnt/raoxuan/open_datasets/coco_val2014_hf,flickr30k_hf=/data/home/zengyong1/dataset/flickr30k_hf,flickr30k_cn=/mnt/open_datasets/chinese-clip-eval/Flickr30k-CN,mscoco_2014_5k=/data/home/zengyong1/dataset/mscoco_2014_5k_test_hf",
+    "retrieval_batch_size": 128,
+    "retrieval_recall_ks": "1,5,10",
+    "retrieval_max_images": 0,
+    "output_dir": "experiments/paper_transfer_aware/E2_distill_3seed",
+    "experiment_name": "E2TA__C2__seed44",
+    "async_eval_dir": null,
+    "save_step_artifacts": false,
+    "skip_inline_eval": false
+  },
+  "args": {
+    "task_sequence": [
+      "aircraft",
+      "caltech101",
+      "dtd",
+      "eurosat",
+      "flowers",
+      "food101",
+      "mnist",
+      "oxford_pets",
+      "stanford_cars",
+      "sun397"
+    ],
+    "seed": 44,
+    "method": "lora_nsp",
+    "eval_max_samples": 0,
+    "num_shots": 16,
+    "full_shot": false,
+    "eval_resize_mode": "preserve_aspect",
+    "ensemble_routing": "zs_predicted_seen"
+  },
+  "accuracy_matrix": [
+    [
+      0.5403540134429932,
+      0.754969596862793,
+      0.3646572232246399,
+      0.35543209314346313,
+      0.643524169921875,
+      0.8341584205627441,
+      0.4578000009059906,
+      0.8768056631088257,
+      0.6343738436698914,
+      0.6096221208572388
+    ],
+    [
+      0.535553514957428,
+      0.8608519434928894,
+      0.36288416385650635,
+      0.3641975224018097,
+      0.6557044386863708,
+      0.8324752449989319,
+      0.4478999972343445,
+      0.8819841742515564,
+      0.6386021971702576,
+      0.6130478382110596
+    ],
+    [
+      0.537953794002533,
+      0.8563894629478455,
+      0.6477541327476501,
+      0.4170370399951935,
+      0.6626065969467163,
+      0.827623724937439,
+      0.4761999845504761,
+      0.8781684041023254,
+      0.6382291316986084,
+      0.6125944256782532
+    ],
+    [
+      0.5376537442207336,
+      0.8519269824028015,
+      0.652482271194458,
+      0.8396296501159668,
+      0.6609825491905212,
+      0.8277557492256165,
+      0.4950999915599823,
+      0.8778958320617676,
+      0.6364880204200745,
+      0.611939549446106
+    ],
+    [
+      0.5313531160354614,
+      0.8576064705848694,
+      0.6566193699836731,
+      0.8355555534362793,
+      0.9809175729751587,
+      0.8279207944869995,
+      0.5047000050544739,
+      0.87626051902771,
+      0.6369854807853699,
+      0.6146599054336548
+    ],
+    [
+      0.5463545918464661,
+      0.8523326516151428,
+      0.6761229038238525,
+      0.8349382877349854,
+      0.9805116057395935,
+      0.8576237559318542,
+      0.5120999813079834,
+      0.8738075494766235,
+      0.6376072764396667,
+      0.6149117946624756
+    ],
+    [
+      0.5304530262947083,
+      0.8584178686141968,
+      0.6749408841133118,
+      0.8350617289543152,
+      0.9805116057395935,
+      0.8566006422042847,
+      0.9496999979019165,
+      0.8765330910682678,
+      0.6358662247657776,
+      0.6134004592895508
+    ],
+    [
+      0.5319531559944153,
+      0.8588235378265381,
+      0.6743499040603638,
+      0.8224691152572632,
+      0.9813235998153687,
+      0.8556435704231262,
+      0.9503999948501587,
+      0.9280457496643066,
+      0.6351200342178345,
+      0.6151636838912964
+    ],
+    [
+      0.5313531160354614,
+      0.8596348762512207,
+      0.6761229038238525,
+      0.8277778029441833,
+      0.9801055788993835,
+      0.8580527901649475,
+      0.9495999813079834,
+      0.9261378645896912,
+      0.8522571921348572,
+      0.6165239214897156
+    ],
+    [
+      0.5331532955169678,
+      0.8681541681289673,
+      0.7050827145576477,
+      0.9232098460197449,
+      0.9796995520591736,
+      0.8610891103744507,
+      0.9531999826431274,
+      0.9266830086708069,
+      0.8517597913742065,
+      0.7594962120056152
+    ]
+  ],
+  "metrics": {
+    "zero_shot": {
+      "transfer": 61.903906724492906,
+      "average": 71.35561987757684,
+      "last": 80.94550162553787
+    },
+    "lr_rgda": {
+      "transfer": 0.0,
+      "average": 44.51234811544419,
+      "last": 82.43702828884125
+    },
+    "ours_ensemble": {
+      "transfer": 62.14633976971662,
+      "average": 72.62406998872757,
+      "last": 83.61527681350708
+    }
+  },
+  "summary_metrics": {
+    "zero_shot": {
+      "transfer": 61.903906724492906,
+      "average": 71.35561987757684,
+      "last": 80.94550162553787
+    },
+    "lr_rgda": {
+      "transfer": 0.0,
+      "average": 44.51234811544419,
+      "last": 82.43702828884125
+    },
+    "ours_ensemble": {
+      "transfer": 62.14633976971662,
+      "average": 72.62406998872757,
+      "last": 83.61527681350708
+    }
+  },
+  "per_file_results": {
+    "zero_shot": "E2TA__C2__seed44_zs_results.json",
+    "lr_rgda": "E2TA__C2__seed44_rgda_results.json",
+    "ensemble": "E2TA__C2__seed44_ens_results.json"
+  }
+}
