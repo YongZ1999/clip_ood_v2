@@ -1,7 +1,7 @@
 # 论文正式实验结果汇总
 
-**实验时间**: 2026-07-13 ~ 2026-07-16
-**代码版本**: main_v3 (`ea74d94`；LoRA 系列正式结果）+ v4（官方 LADA 任务后检索评测）
+**实验时间**: 2026-07-13 ~ 2026-07-24
+**代码版本**: main_v3 (`ea74d94`；LoRA 系列正式结果）+ v4（官方 LADA 任务后检索评测）+ transfer-aware 分支（标准 CLIP 测试预处理与后续优化审计）
 **协议**: X-TAIL 10-task Class-Incremental Learning, 16-shot / full-shot
 **指标**: LADA Transfer / Average / Last（百分比）；3-seed mean ± population std（与 `scripts/summarize_continual_metrics.py` 一致）
 
@@ -19,6 +19,7 @@
 8. [汇总对比](#8-汇总对比)
 9. [E7: SigLIP2 鲁棒性](#9-e7-siglip2-鲁棒性)
 10. [核心结论](#10-核心结论)
+11. [Transfer/Average 提升实验与最终优化结论](#11-transferaverage-提升实验与最终优化结论)
 
 ---
 
@@ -409,3 +410,121 @@ Backbone: `google/siglip2-base-patch16-224`, X-TAIL 16-shot, 3 seeds.
 6. **检索结论需双向报告**：完整模型的 I2T 基本接近 Frozen CLIP，但 Flickr30K 的 T2I 仍低于 C0；因此本文只主张“未见明显 I2T 退化/adapter 间无系统性差异”，不主张所有检索方向完全不变。
 7. **LADA 的检索不是 Frozen CLIP**：官方 LADA 的最终 I2T 略有提升，但 T2I 在两个检索集上均明显下降；冻结视觉端不足以推出跨模态能力不变。
 8. **跨 backbone 边界**：在 SigLIP2 上，LoRA-NF 的 Transfer 更高，而 Native LADA 的 Average/Last 略高。由于两者保留各自原生训练日程，E7 是鲁棒性验证而非等计算预算的胜负结论。
+
+---
+
+## 11. Transfer/Average 提升实验与最终优化结论
+
+本节汇总 2026-07-20 之后专门针对“历史 LoRA-NF 的 Last 已较高、但 Transfer/Average 能否进一步提高”进行的全部实验。这里的目标不是重复证明 LoRA-NF、CD 或 LR-RGDA Ensemble 的有效性（它们已是历史正式配置的一部分），而是寻找能在该最佳配置上继续提高 Transfer 与 Average 的操作。
+
+除特别注明的 D1/D2 单 seed 离线扫描外，本节三 seed 结果均直接由原始 JSON 重算，报告 mean ± **sample std**。第 1--10 节的历史 `paper_formal` 表格保留其原有 population std 口径，因此同一均值旁的 std 末位可能不同；本节中的比较均使用同一 sample std 口径。
+
+### 11.1 唯一得到受控三-seed 正向证据的改动：`preserve_aspect`
+
+#### 原理与实验控制
+
+历史 CLIP 分类测试预处理为 `Resize((224, 224))`，即无论原图宽高比如何，均直接拉伸到正方形；这会改变物体形状和局部比例。`preserve_aspect` 改为标准 CLIP/LADA 风格的 `Resize(shorter_edge=224) -> CenterCrop(224)`：先按比例缩放短边，再中心裁剪为 224×224。训练增强、LoRA-NF、NSP、FD/CD、LR-RGDA、任务顺序以及检索编码流程均未改变。
+
+E0-PA 使用 LoRA-NF 16-shot 的 seeds 42/43/44，严格匹配历史 E1 的训练与推理配置：800 iterations、rank=4、`nsp_eps=.20`、`nsp_weight=.02`、FD=1、CD=2、`alpha=.05`、M=4、rank=32、fit=200、`gmm_sample` 和历史 `classwise` 融合。唯一有意变量为 `--eval_resize_mode preserve_aspect`。由于需要独立重训，仍可能存在很小的非确定性训练波动；因此该实验应表述为匹配配置与种子下的受控三-seed 协议对照，而非新的训练模块。
+
+E0 同时保存了逐任务检索 JSON，以确认运行完整性，但检索使用独立的 CLIP retrieval preprocessing，并不经过此处的 X-TAIL 分类 test transform；因此不把 E0 的检索数值解释为 `preserve_aspect` 的因果效果。
+
+#### 总体结果与同 seed 对照
+
+| Config | Transfer | Average | Last |
+|---|:---:|:---:|:---:|
+| Historical E1: `legacy_square + classwise` | 60.14 ± 0.20 | 71.75 ± 0.10 | **83.74 ± 0.04** |
+| **E0-PA: `preserve_aspect + classwise`** | **61.88 ± 0.09** | **72.57 ± 0.10** | 83.69 ± 0.15 |
+| **E0-PA − Historical** | **+1.74** | **+0.82** | -0.05 |
+
+| Seed | Legacy Transfer / Average / Last | Preserve-aspect Transfer / Average / Last | Delta Transfer / Average / Last |
+|:---:|:---:|:---:|:---:|
+| 42 | 60.00 / 71.65 / 83.70 | 61.82 / 72.69 / 83.61 | +1.83 / +1.04 / -0.09 |
+| 43 | 60.05 / 71.84 / 83.74 | 61.83 / 72.50 / 83.86 | +1.78 / +0.66 / +0.12 |
+| 44 | 60.37 / 71.77 / 83.78 | 61.98 / 72.53 / 83.60 | +1.61 / +0.76 / -0.18 |
+
+该结果说明，历史 Transfer 偏低的主要可修正因素并非必须依赖更强的 RGDA 或更长训练，而是测试输入与 CLIP 的标准预处理不一致。更重要的是，三条轨迹都提高了 Transfer 和 Average，而 Last 基本不变。
+
+#### 10 个 X-TAIL 任务的逐项结果
+
+下表是三个 seed 的逐任务均值。`aircraft` 是第一个任务，没有“学习该任务之前”的时刻，故其 Transfer 按指标定义为 N/A，不进入总体 Transfer 均值。
+
+| Dataset | Legacy Transfer | PA Transfer | Delta | Legacy Average | PA Average | Delta | Legacy Last | PA Last | Delta |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| aircraft | N/A | N/A | N/A | 52.39 | 53.56 | +1.17 | 52.61 | 53.76 | +1.15 |
+| caltech101 | 74.54 | 75.66 | +1.12 | 87.93 | 85.23 | -2.71 | 91.68 | 87.17 | -4.52 |
+| dtd | 36.95 | 36.21 | -0.74 | 61.49 | 61.29 | -0.20 | 71.00 | 71.41 | +0.41 |
+| eurosat | 37.13 | 36.65 | -0.48 | 72.24 | 70.02 | -2.23 | 92.43 | 91.89 | -0.54 |
+| flowers | 63.58 | 65.06 | +1.48 | 84.12 | 84.89 | +0.77 | 97.98 | 98.15 | +0.16 |
+| food101 | 82.45 | 83.08 | +0.63 | 83.72 | 84.45 | +0.73 | 85.45 | 86.12 | +0.67 |
+| mnist | 44.38 | 46.98 | +2.60 | 64.37 | 65.85 | +1.48 | 94.68 | 94.42 | -0.26 |
+| oxford_pets | 84.60 | 88.04 | +3.44 | 86.44 | 89.53 | +3.09 | 90.76 | 93.03 | +2.27 |
+| stanford_cars | 56.20 | 63.81 | +7.61 | 61.94 | 68.05 | +6.11 | 84.84 | 84.89 | +0.05 |
+| sun397 | 61.42 | 61.41 | -0.01 | 62.87 | 62.87 | -0.00 | 75.95 | 76.03 | +0.08 |
+
+增益主要来自对几何形状敏感的数据集：Stanford Cars 的 Transfer/Average 分别提高 7.61/6.11 点，Oxford Pets 提高 3.44/3.09 点，MNIST 提高 2.60/1.48 点。Caltech101 和 EuroSAT 的 Average/Last 有下降，因此不应声称每个数据集均受益；总体提升来自更合理预处理在任务异质性上的净收益。
+
+#### 与 LADA 的比较
+
+官方 LADA 训练器本来就使用等比例 resize + center crop。因此，E0-PA 与 LADA 复现使用一致的分类图像预处理，比较不再受 `legacy_square` 的明显混杂影响。两者仍是不同训练方法与分类头，以下为均值差而非配对显著性检验。
+
+| Method | Transfer | Average | Last | E0-PA 的差值 |
+|---|:---:|:---:|:---:|:---:|
+| LADA 官方复现（16-shot，3 seeds） | 61.60 ± 0.20 | 72.30 ± 0.44 | 82.97 ± 0.21 | — |
+| **LoRA-NF E0-PA（16-shot，3 seeds）** | **61.88 ± 0.09** | **72.57 ± 0.10** | **83.69 ± 0.15** | **+0.28 / +0.27 / +0.72** |
+| LADA 论文报告（上下文参考） | 56.70 | 68.90 | 83.10 | +5.18 / +3.67 / +0.59 |
+
+相对本项目的官方 LADA 复现，E0-PA 在三个汇总指标上均略高；但 Transfer/Average 的差值不足 0.3 点，且方法的分类器不同，论文中宜表述为“在一致预处理下具有竞争力/略优”，不应夸大为大幅领先。LADA 原论文数字可作为文献参照，不能与本地复现直接混合统计。
+
+### 11.2 当前 transfer-aware E1 与 routing 的结论
+
+transfer-aware E1 使用 `preserve_aspect + zs_predicted_seen`，LoRA-NF 16-shot 的 Ensemble 为 `61.91 ± 0.22 / 72.63 ± 0.05 / 83.72 ± 0.10`。这比 E0-PA 的均值再高 0.04/0.06/0.03，但不能归因于 routing：两组是独立重训轨迹。
+
+对同一个保存的 encoder artifact 进行直接离线对照时，`classwise` 与 `zs_predicted_seen` 得到完全相同的 Accuracy Matrix 和 `61.6812 / 72.7391 / 83.7318`。代码中的 `alpha_sensitivity` 开关只额外记录 alpha sweep，不改变固定 `alpha=.05` 的主预测；E0 与 E1 在该字段上的差异不是原因。因此，**没有证据表明 `zs_predicted_seen` 能提高 Transfer 或 Average**，正式协议可保留更简单、与历史一致的 `classwise`。
+
+### 11.3 在 preserve-aspect 基础上的分类器优化：均未形成可靠改进
+
+D1/D2 复用一个 LoRA-NF 16-shot seed-42 encoder artifact，仅离线改变分类器设置；其作用是筛选候选，而不是正式主表。预先规定的晋级条件为：Average 至少提高 0.20，同时不损害 Transfer/Last。所有候选均未达到该条件。
+
+| Exploration | Matched single-seed result (Transfer / Average / Last) | 结论 |
+|---|:---:|---|
+| alpha=.02 | 61.6381 / 72.6962 / 83.8389 | 与 alpha=.05 几乎持平 |
+| alpha=.05（matched baseline） | 61.6828 / 72.6895 / 83.8298 | — |
+| M=4, `gmm_mean`, fit=200, alpha=.02 | 61.6366 / 72.7520 / 83.9325 | 相比匹配 `gmm_sample` 仅约 +0.05 Average；未达门槛，且采样随机性可覆盖此差异 |
+| rank=8, `gmm_mean`, alpha=.05 | 61.6815 / 72.8349 / 84.0744 | 相比 D1 matching baseline 仅 +0.08 Average；rank=8 与 rank=15/24/32 的净差约 0.004，主要是 alpha/source 共同变化而非 rank 收益 |
+
+因此，没有证据支持把正式的 `alpha=.05, M=4, gmm_sample, rank=32, fit=200` 替换为新的 LR-RGDA 配置。继续在同一个测试 seed 上追逐小数点会产生事后选参风险。
+
+### 11.4 训练端组件与 adapter 的后续三-seed 复核
+
+E2-TA 和 E3-TA 在 `preserve_aspect` 协议下补齐了三 seed，用于判断 FD/CD 或替换 adapter 是否能在当前 LoRA-NF 主配置之上进一步改善 Transfer/Average。
+
+#### FD/CD
+
+| Config | Transfer | Average | Last | 相对完整 C3 的判断 |
+|---|:---:|:---:|:---:|---|
+| C0: FD=0, CD=0 | 61.95 ± 0.09 | 72.06 ± 0.19 | 83.34 ± 0.23 | Transfer 接近，但 Average/Last 分别低 0.58/0.38 |
+| C1: FD=1, CD=0 | **62.01 ± 0.27** | 72.06 ± 0.09 | 83.42 ± 0.09 | Transfer 均值略高，但 Average 低 0.57；不满足双指标目标 |
+| C2: FD=0, CD=2 | 61.92 ± 0.23 | **72.64 ± 0.07** | **83.76 ± 0.14** | 与 C3 的 +0.01/+0.01/+0.04 远小于方差 |
+| C3: FD=1, CD=2（完整） | 61.91 ± 0.22 | 72.63 ± 0.05 | 83.72 ± 0.10 | 当前完整训练配置 |
+
+CD 是 Average/Last 的主要来源，但移除 FD 并没有可重复、可解释的 Transfer/Average 联合增益；因此保持完整 FD+CD，而不是根据 C2 的小数点差异更换配置。
+
+#### Adapter 替换
+
+| Adapter | Transfer | Average | Last | 相对 LoRA-NF |
+|---|:---:|:---:|:---:|:---:|
+| Standard LoRA | 61.59 ± 0.15 | 71.75 ± 0.34 | 82.04 ± 0.29 | -0.32 / -0.89 / -1.68 |
+| LoRA-Null | 61.74 ± 0.12 | 71.49 ± 0.19 | 82.14 ± 0.16 | -0.17 / -1.14 / -1.58 |
+| Gradient-projected LoRA | 61.78 ± 0.14 | 72.13 ± 0.23 | 82.96 ± 0.07 | -0.13 / -0.50 / -0.76 |
+| **LoRA-NF** | **61.91 ± 0.22** | **72.63 ± 0.05** | **83.72 ± 0.10** | — |
+
+没有 adapter 替代项能够超过 LoRA-NF；E3 进一步支持 LoRA-NF 是当前最佳训练端选择，但不是额外的“调参提升”。
+
+### 11.5 最终结论与推荐配置
+
+1. **`preserve_aspect` 是本轮唯一被受控三-seed 证实、同时提高 Transfer（+1.74）与 Average（+0.82）的新操作。** 它是评估协议修正，不应包装成新的 LoRA-NF 训练组件。
+2. `zs_predicted_seen`、alpha、RGDA rank/centers/source/fit 的探索都没有形成足以替换正式配置的可靠提升；停止这些方向是正确的实验决策。
+3. CD 对 Average/Last 有明确作用，但它已属于原始完整方法；FD+CD 与仅 CD 的差异不够稳定，保持完整配置以避免基于测试结果的事后精简。
+4. 建议用于新的、与 LADA 预处理一致的正式协议：`eval_resize_mode=preserve_aspect`、`ensemble_routing=classwise`、LoRA-NF rank=4、`nsp_eps=.20`、`nsp_weight=.02`、FD=1、CD=2、`alpha=.05`、M=4、`gmm_sample`、rank=32、fit=200。
+5. 对论文叙事，最准确的表述是：标准 CLIP 预处理消除了一个影响前向迁移的评估混杂因素；在此一致协议下，LoRA-NF 相对本地官方 LADA 复现为 `+0.28 Transfer / +0.27 Average / +0.72 Last`，但 Transfer/Average 的优势较小，应以审慎措辞报告。
